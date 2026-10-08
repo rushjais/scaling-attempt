@@ -1,0 +1,5 @@
+pilot/upstream/
+pilot/work/
+pilot/check/baseline/
+__pycache__/
+*.pyc
