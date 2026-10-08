@@ -20,9 +20,9 @@ measured candidates ([`SHORTLIST.md`](SHORTLIST.md)).
 
 Full write-up of every run, check and decision: [`pilot/PILOT.md`](pilot/PILOT.md).
 
-**What it taught me.** When the specification is readable (the old code, in a
-migration), careful agents don't miss it: every run built its own old-vs-new
-comparison unprompted. Known bug patterns are solved instantly. In the first
+**What it taught me.** In these pilots, when the specification was readable
+(the old code, in a migration), careful agents didn't miss it: every run built
+its own old-vs-new comparison unprompted. Known bug patterns are solved instantly. In the first
 project, agents failed when behavior had to be *discovered* and lay outside
 what they thought to test, so a harder second task needs that property, not
 more lines of code.
