@@ -38,7 +38,9 @@ def main():
     ap.add_argument("--model", required=True)
     ap.add_argument("--timeout", type=float, default=120, help="minutes")
     ap.add_argument("--budget", type=float, default=20.0)
-    ap.add_argument("--prompt", default="PROMPT.md")
+    ap.add_argument("--prompt", default="PROMPT.md", help="path relative to pilot/ (or absolute)")
+    ap.add_argument("--extra", help="directory whose contents are copied into the workspace before the first commit")
+    ap.add_argument("--checker", default=os.path.join(HERE, "check", "check.py"))
     args = ap.parse_args()
 
     token = open(TOKEN_FILE).read().strip()
@@ -48,6 +50,8 @@ def main():
     os.makedirs(out)
     repo = os.path.join(work, "repo")
     shutil.copytree(os.path.join(HERE, "upstream"), repo, ignore=shutil.ignore_patterns(".git", "__pycache__"))
+    if args.extra:
+        shutil.copytree(args.extra, repo, dirs_exist_ok=True)
     env_git = {**os.environ, "GIT_AUTHOR_NAME": "dev", "GIT_AUTHOR_EMAIL": "dev@example.com",
                "GIT_COMMITTER_NAME": "dev", "GIT_COMMITTER_EMAIL": "dev@example.com"}
     sh(["git", "init", "-q"], cwd=repo)
@@ -101,7 +105,7 @@ def main():
             continue
         if ev.get("type") == "result":
             result = ev
-    check = subprocess.run([sys.executable, os.path.join(HERE, "check", "check.py"), repo],
+    check = subprocess.run([sys.executable, args.checker, repo],
                            capture_output=True, text=True)
     summary = {"run_id": run_id, "model": args.model, "prompt": args.prompt, "status": status, "minutes": minutes,
                "cost_usd": result.get("total_cost_usd"), "agent_final_message": result.get("result"),
