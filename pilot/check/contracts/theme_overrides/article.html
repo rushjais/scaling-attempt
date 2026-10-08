@@ -1,0 +1,13 @@
+{% extends "!simple/article.html" %}
+{% block content %}
+{{ super() }}
+<!-- path-contract probe: ordinary string operations a theme might do on path values -->
+<p class="probe">
+src-md:{{ article.source_path.endswith('.md') }}
+rel-parts:{{ article.relative_source_path.split('/')|join('|') }}
+saveas-len:{{ article.save_as|length }}
+saveas-upper:{{ article.save_as.upper() }}
+out-starts:{{ output_file.startswith('posts') }}
+url-concat:{{ SITEURL ~ '/' ~ article.url }}
+</p>
+{% endblock %}

@@ -1,0 +1,1888 @@
+diff --git a/pelican/__init__.py b/pelican/__init__.py
+index a69e574..2e3eb74 100644
+--- a/pelican/__init__.py
++++ b/pelican/__init__.py
+@@ -32,7 +32,16 @@ from pelican.plugins import signals
+ from pelican.plugins._utils import get_plugin_name, load_plugins
+ from pelican.server import ComplexHTTPRequestHandler, RootedHTTPServer
+ from pelican.settings import read_settings
+-from pelican.utils import clean_output_dir, maybe_pluralize, wait_for_changes
++from pelican.utils import (
++    absolute_path,
++    clean_output_dir,
++    expand_user,
++    maybe_pluralize,
++    path_exists,
++    path_is_file,
++    real_path,
++    wait_for_changes,
++)
+ from pelican.writers import Writer
+ 
+ try:
+@@ -66,6 +75,7 @@ class Pelican:
+         signals.initialized.send(self)
+ 
+     def init_path(self):
++        # sys.path entries naming the current directory, compared as strings
+         if not any(p in sys.path for p in ["", os.curdir]):
+             logger.debug("Adding current directory to system path")
+             sys.path.insert(0, "")
+@@ -114,10 +124,8 @@ class Pelican:
+ 
+         # Delete the output directory if (1) the appropriate setting is True
+         # and (2) that directory is not the parent of the source directory
+-        if self.delete_outputdir and os.path.commonpath(
+-            [os.path.realpath(self.output_path)]
+-        ) != os.path.commonpath(
+-            [os.path.realpath(self.output_path), os.path.realpath(self.path)]
++        if self.delete_outputdir and not real_path(self.path).is_relative_to(
++            real_path(self.output_path)
+         ):
+             clean_output_dir(self.output_path, self.output_retention)
+ 
+@@ -521,12 +529,12 @@ def get_config(args):
+     """Builds a config dictionary based on supplied `args`."""
+     config = {}
+     if args.path:
+-        config["PATH"] = os.path.abspath(os.path.expanduser(args.path))
++        config["PATH"] = str(absolute_path(expand_user(args.path)))
+     if args.output:
+-        config["OUTPUT_PATH"] = os.path.abspath(os.path.expanduser(args.output))
++        config["OUTPUT_PATH"] = str(absolute_path(expand_user(args.output)))
+     if args.theme:
+-        abstheme = os.path.abspath(os.path.expanduser(args.theme))
+-        config["THEME"] = abstheme if os.path.exists(abstheme) else args.theme
++        abstheme = absolute_path(expand_user(args.theme))
++        config["THEME"] = str(abstheme) if path_exists(abstheme) else args.theme
+     if args.delete_outputdir is not None:
+         config["DELETE_OUTPUT_DIRECTORY"] = args.delete_outputdir
+     if args.ignore_cache:
+@@ -547,7 +555,7 @@ def get_config(args):
+ 
+ def get_instance(args):
+     config_file = args.settings
+-    if config_file is None and os.path.isfile(DEFAULT_CONFIG_NAME):
++    if config_file is None and path_is_file(DEFAULT_CONFIG_NAME):
+         config_file = DEFAULT_CONFIG_NAME
+         args.settings = DEFAULT_CONFIG_NAME
+ 
+@@ -568,7 +576,7 @@ def autoreload(args, excqueue=None):
+         " `settings` for changes. ---"
+     )
+     pelican, settings = get_instance(args)
+-    settings_file = os.path.abspath(args.settings)
++    settings_file = str(absolute_path(args.settings))
+     while True:
+         try:
+             pelican.run()
+diff --git a/pelican/cache.py b/pelican/cache.py
+index 8bd3426..951b38a 100644
+--- a/pelican/cache.py
++++ b/pelican/cache.py
+@@ -1,8 +1,8 @@
+ import gzip
+ import hashlib
+ import logging
+-import os
+ import pickle
++from pathlib import Path
+ 
+ from pelican.utils import mkdir_p
+ 
+@@ -20,7 +20,7 @@ class FileDataCacher:
+         Sets caching policy according to *caching_policy*.
+         """
+         self.settings = settings
+-        self._cache_path = os.path.join(self.settings["CACHE_PATH"], cache_name)
++        self._cache_path = Path(self.settings["CACHE_PATH"], cache_name)
+         self._cache_data_policy = caching_policy
+         if self.settings["GZIP_CACHE"]:
+             self._cache_open = gzip.open
+@@ -88,7 +88,7 @@ class FileStampDataCacher(FileDataCacher):
+ 
+         method = self.settings["CHECK_MODIFIED_METHOD"]
+         if method == "mtime":
+-            self._filestamp_func = os.path.getmtime
++            self._filestamp_func = lambda filename: Path(filename).stat().st_mtime
+         else:
+             try:
+                 hash_func = getattr(hashlib, method)
+diff --git a/pelican/contents.py b/pelican/contents.py
+index 11459f7..e704d04 100644
+--- a/pelican/contents.py
++++ b/pelican/contents.py
+@@ -3,8 +3,10 @@ import datetime
+ import locale
+ import logging
+ import os
++import posixpath
+ import re
+ from html import unescape
++from pathlib import Path, PurePath
+ from typing import Any
+ from urllib.parse import ParseResult, unquote, urljoin, urlparse, urlunparse
+ 
+@@ -20,10 +22,12 @@ from pelican.settings import DEFAULT_CONFIG, Settings
+ # Import these so that they're available when you import from pelican.contents.
+ from pelican.urlwrappers import Author, Category, Tag, URLWrapper  # NOQA
+ from pelican.utils import (
++    StrPath,
+     deprecated_attribute,
+     memoized,
++    path_stem,
+     path_to_url,
+-    posixize_path,
++    relative_path,
+     sanitised_join,
+     set_date_tzinfo,
+     slugify,
+@@ -116,7 +120,7 @@ class Content:
+             if settings["SLUGIFY_SOURCE"] == "title" and hasattr(self, "title"):
+                 value = self.title
+             elif settings["SLUGIFY_SOURCE"] == "basename" and source_path is not None:
+-                value = os.path.basename(os.path.splitext(source_path)[0])
++                value = path_stem(source_path)
+             else:
+                 value = None
+             if value is not None:
+@@ -267,6 +271,7 @@ class Content:
+         # instead of correct "http://foo/bar.html", so one has to pick a side
+         # as there is no silver bullet.
+         if self.settings["RELATIVE_URLS"]:
++            # Joins URLs, not filesystem paths.
+             joiner = os.path.join
+         else:
+             joiner = urljoin
+@@ -291,7 +296,7 @@ class Content:
+                     else:
+                         # relative to the source path of this content
+                         path = self.get_relative_source_path(  # type: ignore
+-                            os.path.join(self.relative_dir, path)
++                            self._join_relative_dir(path)
+                         )
+                     return self._context[key].get(path, None)
+ 
+@@ -409,9 +414,7 @@ class Content:
+                 path = path[1:]
+             else:
+                 # relative to the source path of this content
+-                path = self.get_relative_source_path(
+-                    os.path.join(self.relative_dir, path)
+-                )
++                path = self.get_relative_source_path(self._join_relative_dir(path))
+             path = path.replace("%20", " ")  # type: ignore
+             static_links.add(path)
+         return static_links
+@@ -501,7 +504,9 @@ class Content:
+         else:
+             return self.default_template
+ 
+-    def get_relative_source_path(self, source_path: str | None = None) -> str | None:
++    def get_relative_source_path(
++        self, source_path: StrPath | None = None
++    ) -> str | None:
+         """Return the relative path (from the content path) to the given
+         source_path.
+ 
+@@ -513,23 +518,26 @@ class Content:
+         if source_path is None:
+             return None
+ 
+-        return posixize_path(
+-            os.path.relpath(
+-                os.path.abspath(os.path.join(self.settings["PATH"], source_path)),
+-                os.path.abspath(self.settings["PATH"]),
+-            )
+-        )
++        return relative_path(
++            Path(self.settings["PATH"], source_path), self.settings["PATH"]
++        ).as_posix()
+ 
+     @property
+     def relative_dir(self) -> str:
+-        return posixize_path(
+-            os.path.dirname(
+-                os.path.relpath(
+-                    os.path.abspath(self.source_path),
+-                    os.path.abspath(self.settings["PATH"]),
+-                )
+-            )
+-        )
++        relative_dir = relative_path(self.source_path, self.settings["PATH"]).parent
++        # The directory of a bare file name is "" rather than "."
++        return "" if relative_dir == Path() else relative_dir.as_posix()
++
++    def _join_relative_dir(self, path: str) -> Path | None:
++        """Join a link path, relative to this content, to relative_dir.
++
++        Return None (meaning this content's own source path) when both are
++        empty, as joining them with os.path.join() used to give "".
++        """
++        relative_dir = self.relative_dir
++        if not relative_dir and not path:
++            return None
++        return Path(relative_dir, path)
+ 
+     def refresh_metadata_intersite_links(self) -> None:
+         for key in self.settings["FORMATTED_FIELDS"]:
+@@ -651,11 +659,16 @@ class Static(Content):
+         # document's source directory, preserve that relationship on output.
+         # Otherwise, make it a sibling.
+ 
+-        linking_source_dir = os.path.dirname(content.source_path)
+-        tail_path = os.path.relpath(self.source_path, linking_source_dir)
+-        if tail_path.startswith(os.pardir + os.sep):
+-            tail_path = os.path.basename(tail_path)
+-        new_save_as = os.path.join(os.path.dirname(content.save_as), tail_path)
++        linking_source_dir = Path(content.source_path).parent
++        tail_path = relative_path(self.source_path, linking_source_dir)
++        if len(tail_path.parts) > 1 and tail_path.parts[0] == os.pardir:
++            tail_path = PurePath(tail_path.name)
++        # save_as is formatted from a *_SAVE_AS URL template and also gives the
++        # new url below, so its directory is handled as a URL path, as it is in
++        # path_to_url().
++        new_save_as = posixpath.join(
++            posixpath.dirname(content.save_as), tail_path.as_posix()
++        )
+ 
+         # We do not build our new url by joining tail_path with the linking
+         # document's url, because we cannot know just by looking at the latter
+diff --git a/pelican/generators.py b/pelican/generators.py
+index 515257c..b2575c8 100644
+--- a/pelican/generators.py
++++ b/pelican/generators.py
+@@ -7,6 +7,7 @@ from collections import defaultdict
+ from functools import partial
+ from itertools import chain, groupby
+ from operator import attrgetter
++from pathlib import Path, PurePath
+ 
+ from jinja2 import (
+     BaseLoader,
+@@ -24,11 +25,25 @@ from pelican.plugins._utils import plugin_enabled
+ from pelican.readers import Readers
+ from pelican.utils import (
+     DateFormatter,
++    _copy,
++    absolute_path,
+     copy,
++    expand_user,
++    is_normalized,
+     mkdir_p,
++    normalize_path,
+     order_content,
+-    posixize_path,
++    path_basename,
++    path_exists,
++    path_extension,
++    path_is_dir,
++    path_is_file,
++    path_is_symlink,
++    path_stem,
+     process_translations,
++    real_path,
++    relative_path,
++    walk,
+ )
+ from pelican.writers import FileOverwriteFailedError
+ 
+@@ -39,6 +54,32 @@ class PelicanTemplateNotFound(Exception):
+     pass
+ 
+ 
++def _ends_with_separator(path):
++    """Return whether a path setting is spelled with a trailing separator."""
++    # Plain string handling: this inspects the spelling, which pathlib drops.
++    return isinstance(path, str) and path[-1:] in (os.sep, os.altsep)
++
++
++def _is_excludable(exclude):
++    """Return whether an *_EXCLUDES path can match a directory in get_files().
++
++    Excluded directories used to be found by comparing spellings, so those
++    whose parent was spelled with "." components (say) never matched, nor
++    did those with an empty or "." name (a trailing separator, say).
++    """
++    if not isinstance(exclude, str):
++        return True
++    # Plain string handling: this inspects the spelling, which pathlib drops.
++    # Appending a character makes the last component a name pathlib keeps.
++    name = PurePath(exclude + "_").name[:-1]
++    parent = exclude[: len(exclude) - len(name)]
++    while _ends_with_separator(parent) and len(parent) > 1:
++        parent = parent[:-1]
++    return name not in ("", os.curdir, os.pardir) and (
++        _ends_with_separator(parent) or is_normalized(parent)
++    )
++
++
+ class Generator:
+     """Baseclass generator"""
+ 
+@@ -67,13 +108,13 @@ class Generator:
+         self._templates = {}
+         self._templates_path = list(self.settings["THEME_TEMPLATES_OVERRIDES"])
+ 
+-        theme_templates_path = os.path.expanduser(os.path.join(self.theme, "templates"))
++        theme_templates_path = str(expand_user(Path(self.theme, "templates")))
+         self._templates_path.append(theme_templates_path)
+         theme_loader = FileSystemLoader(theme_templates_path)
+ 
+-        simple_theme_path = os.path.dirname(os.path.abspath(__file__))
++        simple_theme_path = absolute_path(__file__).parent
+         simple_loader = FileSystemLoader(
+-            os.path.join(simple_theme_path, "themes", "simple", "templates")
++            simple_theme_path / "themes" / "simple" / "templates"
+         )
+ 
+         self.env = Environment(
+@@ -144,14 +185,14 @@ class Generator:
+         """
+         if extensions is None:
+             extensions = tuple(self.readers.extensions)
+-        basename = os.path.basename(path)
++        basename = path_basename(path)
+ 
+         # check IGNORE_FILES
+         ignores = self.settings["IGNORE_FILES"]
+         if any(fnmatch.fnmatch(basename, ignore) for ignore in ignores):
+             return False
+ 
+-        ext = os.path.splitext(basename)[1][1:]
++        ext = path_extension(basename)[1:]
+         if extensions is False or ext in extensions:
+             return True
+ 
+@@ -173,23 +214,39 @@ class Generator:
+         if isinstance(paths, str):
+             paths = [paths]
+ 
+-        # group the exclude dir names by parent path, for use with os.walk()
++        # group the exclude dir names by parent path, for use with walk()
+         exclusions_by_dirpath = {}
+         for e in exclude:
+-            parent_path, subdir = os.path.split(os.path.join(self.path, e))
+-            exclusions_by_dirpath.setdefault(parent_path, set()).add(subdir)
++            if not _is_excludable(e):
++                continue
++            excluded = Path(self.path, e)
++            exclusions_by_dirpath.setdefault(excluded.parent, set()).add(excluded.name)
+ 
+         files = set()
+         ignores = self.settings["IGNORE_FILES"]
+         for path in paths:
+-            # careful: os.path.join() will add a slash when path == ''.
+-            root = os.path.join(self.path, path) if path else self.path
++            if not self.path and not path:
++                # An empty path names nothing (Path("") is the current directory)
++                continue
++            root = Path(self.path, path)
++            # Likewise, exclusions only applied to directories spelled the same
++            # way. A single trailing separator only changed the spelling of
++            # the top directory: the walk spelled subdirectories normally.
++            if path:
++                top_excludable = is_normalized(path)
++                subdirs_excludable = top_excludable or (
++                    _ends_with_separator(path) and is_normalized(path[:-1])
++                )
++            else:
++                top_excludable = not _ends_with_separator(self.path)
++                subdirs_excludable = True
+ 
+-            if os.path.isdir(root):
+-                for dirpath, dirs, temp_files in os.walk(
+-                    root, topdown=True, followlinks=True
+-                ):
+-                    excl = exclusions_by_dirpath.get(dirpath, ())
++            if path_is_dir(root):
++                for dirpath, dirs, temp_files in walk(root, followlinks=True):
++                    if top_excludable if dirpath == root else subdirs_excludable:
++                        excl = exclusions_by_dirpath.get(dirpath, ())
++                    else:
++                        excl = ()
+                     # We copy the `dirs` list as we will modify it in the loop:
+                     for d in list(dirs):
+                         if d in excl or any(
+@@ -198,12 +255,16 @@ class Generator:
+                             if d in dirs:
+                                 dirs.remove(d)
+ 
+-                    reldir = os.path.relpath(dirpath, self.path)
++                    reldir = relative_path(dirpath, self.path)
+                     for f in temp_files:
+-                        fp = os.path.join(reldir, f)
++                        fp = str(reldir / f)
+                         if self._include_path(fp, extensions):
+                             files.add(fp)
+-            elif os.path.exists(root) and self._include_path(path, extensions):
++            elif (
++                path_basename(path) not in ("", os.curdir)
++                and path_exists(root)
++                and self._include_path(path, extensions)
++            ):
+                 files.add(path)  # can't walk non-directories
+         return files
+ 
+@@ -221,7 +282,7 @@ class Generator:
+         The path argument is expected to be relative to self.path.
+         """
+         key = "static_content" if static else "generated_content"
+-        self.context[key][posixize_path(os.path.normpath(path))] = None
++        self.context[key][normalize_path(path).as_posix()] = None
+ 
+     def _is_potential_source_path(self, path, static=False):
+         """Return True if path was supposed to be used as a source file.
+@@ -230,7 +291,7 @@ class Generator:
+         The path argument is expected to be relative to self.path.
+         """
+         key = "static_content" if static else "generated_content"
+-        return posixize_path(os.path.normpath(path)) in self.context[key]
++        return normalize_path(path).as_posix() in self.context[key]
+ 
+     def add_static_links(self, content):
+         """Add file links in content to context to be processed as Static
+@@ -286,23 +347,23 @@ class CachingGenerator(Generator, FileStampDataCacher):
+ 
+     def _get_file_stamp(self, filename):
+         """Get filestamp for path relative to generator.path"""
+-        filename = os.path.join(self.path, filename)
++        filename = Path(self.path, filename)
+         return super()._get_file_stamp(filename)
+ 
+ 
+ class _FileLoader(BaseLoader):
+     def __init__(self, path, basedir):
+         self.path = path
+-        self.fullpath = os.path.join(basedir, path)
++        self.fullpath = str(Path(basedir, path))
+ 
+     def get_source(self, environment, template):
+         del environment  # Unused argument
+-        if template != self.path or not os.path.exists(self.fullpath):
++        fullpath = Path(self.fullpath)
++        if template != self.path or not path_exists(fullpath):
+             raise TemplateNotFound(template)
+-        mtime = os.path.getmtime(self.fullpath)
+-        with open(self.fullpath, encoding="utf-8") as f:
+-            source = f.read()
+-        return (source, self.fullpath, lambda: mtime == os.path.getmtime(self.fullpath))
++        mtime = fullpath.stat().st_mtime
++        source = fullpath.read_text(encoding="utf-8")
++        return (source, self.fullpath, lambda: mtime == fullpath.stat().st_mtime)
+ 
+ 
+ class TemplatePagesGenerator(Generator):
+@@ -562,6 +623,7 @@ class ArticlesGenerator(CachingGenerator):
+                 dates=self.dates,
+                 blog=True,
+                 template_name=template,
++                # page_name is used to build pagination URLs.
+                 page_name=os.path.splitext(save_as)[0],
+                 url=url,
+             )
+@@ -1064,7 +1126,7 @@ class StaticGenerator(Generator):
+             self.theme,
+             self.settings["THEME_STATIC_DIR"],
+             self.output_path,
+-            os.curdir,
++            Path(),
+         )
+         for sc in self.context["staticfiles"]:
+             if self._file_update_required(sc):
+@@ -1075,35 +1137,38 @@ class StaticGenerator(Generator):
+     def _copy_paths(self, paths, source, destination, output_path, final_path=None):
+         """Copy all the paths from source to destination"""
+         for path in paths:
+-            source_path = os.path.join(source, path)
++            source_path = Path(source, path)
+ 
+             if final_path:
+-                if os.path.isfile(source_path):
+-                    destination_path = os.path.join(
+-                        output_path, destination, final_path, os.path.basename(path)
++                if path_basename(path) not in ("", os.curdir) and path_is_file(
++                    source_path
++                ):
++                    destination_path = Path(
++                        output_path, destination, final_path, path_basename(path)
+                     )
+                 else:
+-                    destination_path = os.path.join(
+-                        output_path, destination, final_path
+-                    )
++                    destination_path = Path(output_path, destination, final_path)
+             else:
+-                destination_path = os.path.join(output_path, destination, path)
+-
+-            copy(source_path, destination_path, self.settings["IGNORE_FILES"])
++                destination_path = Path(output_path, destination, path)
++
++            # Ignores used to be matched against the last component of the
++            # joined source path, which is empty when path is.
++            source_name = path_basename(path) if path else ""
++            _copy(
++                source_path,
++                destination_path,
++                self.settings["IGNORE_FILES"],
++                source_name,
++            )
+ 
+     def _file_update_required(self, staticfile):
+-        source_path = os.path.join(self.path, staticfile.source_path)
+-        save_as = os.path.join(self.output_path, staticfile.save_as)
+-        if not os.path.exists(save_as):
++        source_path = Path(self.path, staticfile.source_path)
++        save_as = Path(self.output_path, staticfile.save_as)
++        if not path_exists(save_as):
+             return True
+-        elif self.settings["STATIC_CREATE_LINKS"] and os.path.samefile(
+-            source_path, save_as
+-        ):
++        elif self.settings["STATIC_CREATE_LINKS"] and source_path.samefile(save_as):
+             return False
+-        elif (
+-            self.settings["STATIC_CREATE_LINKS"]
+-            and os.path.realpath(save_as) == source_path
+-        ):
++        elif self.settings["STATIC_CREATE_LINKS"] and real_path(save_as) == source_path:
+             return False
+         elif not self.settings["STATIC_CHECK_IF_MODIFIED"]:
+             return True
+@@ -1111,10 +1176,10 @@ class StaticGenerator(Generator):
+             return self._source_is_newer(staticfile)
+ 
+     def _source_is_newer(self, staticfile):
+-        source_path = os.path.join(self.path, staticfile.source_path)
+-        save_as = os.path.join(self.output_path, staticfile.save_as)
+-        s_mtime = os.path.getmtime(source_path)
+-        d_mtime = os.path.getmtime(save_as)
++        source_path = Path(self.path, staticfile.source_path)
++        save_as = Path(self.output_path, staticfile.save_as)
++        s_mtime = source_path.stat().st_mtime
++        d_mtime = save_as.stat().st_mtime
+         return s_mtime - d_mtime > 0.000001  # noqa: PLR2004
+ 
+     def _link_or_copy_staticfile(self, sc):
+@@ -1124,24 +1189,24 @@ class StaticGenerator(Generator):
+             self._copy_staticfile(sc)
+ 
+     def _copy_staticfile(self, sc):
+-        source_path = os.path.join(self.path, sc.source_path)
+-        save_as = os.path.join(self.output_path, sc.save_as)
+-        self._mkdir(os.path.dirname(save_as))
++        source_path = Path(self.path, sc.source_path)
++        save_as = Path(self.output_path, sc.save_as)
++        self._mkdir(save_as.parent)
+         copy(source_path, save_as)
+         logger.info("Copying %s to %s", sc.source_path, sc.save_as)
+ 
+     def _link_staticfile(self, sc):
+-        source_path = os.path.join(self.path, sc.source_path)
+-        save_as = os.path.join(self.output_path, sc.save_as)
+-        self._mkdir(os.path.dirname(save_as))
++        source_path = Path(self.path, sc.source_path)
++        save_as = Path(self.output_path, sc.save_as)
++        self._mkdir(save_as.parent)
+         try:
+-            if os.path.lexists(save_as):
+-                os.unlink(save_as)
++            if path_is_symlink(save_as) or path_exists(save_as):
++                save_as.unlink()
+             logger.info("Linking %s and %s", sc.source_path, sc.save_as)
+             if self.fallback_to_symlinks:
+-                os.symlink(source_path, save_as)
++                save_as.symlink_to(source_path)
+             else:
+-                os.link(source_path, save_as)
++                save_as.hardlink_to(source_path)
+         except OSError as err:
+             if err.errno == errno.EXDEV:  # 18: Invalid cross-device link
+                 logger.debug(
+@@ -1153,8 +1218,9 @@ class StaticGenerator(Generator):
+                 raise err
+ 
+     def _mkdir(self, path):
+-        if os.path.lexists(path) and not os.path.isdir(path):
+-            os.unlink(path)
++        path = Path(path)
++        if (path_is_symlink(path) or path_exists(path)) and not path_is_dir(path):
++            path.unlink()
+         mkdir_p(path)
+ 
+ 
+@@ -1163,8 +1229,15 @@ class SourceFileGenerator(Generator):
+         self.output_extension = self.settings["OUTPUT_SOURCES_EXTENSION"]
+ 
+     def _create_source(self, obj):
+-        output_path, _ = os.path.splitext(obj.save_as)
+-        dest = os.path.join(self.output_path, output_path + self.output_extension)
++        # Replace the extension of the last component of save_as as spelled,
++        # even if empty or "." (appending a character makes it a name pathlib
++        # keeps), as os.path.splitext() did.
++        save_as_dir = PurePath(obj.save_as + "_").parent
++        dest = Path(
++            self.output_path,
++            save_as_dir,
++            path_stem(obj.save_as) + self.output_extension,
++        )
+         copy(obj.source_path, dest)
+ 
+     def generate_output(self, writer=None):
+diff --git a/pelican/paginator.py b/pelican/paginator.py
+index 9dcbb9d..e03081e 100644
+--- a/pelican/paginator.py
++++ b/pelican/paginator.py
+@@ -71,6 +71,8 @@ class Paginator:
+ class Page:
+     def __init__(self, name, url, object_list, number, paginator, settings):
+         self.full_name = name
++        # name is formatted into the PAGINATION_PATTERNS URL templates, so it
++        # is split as a URL, keeping its exact spelling, not as a filesystem path.
+         self.name, self.extension = os.path.splitext(name)
+         dn, fn = os.path.split(name)
+         self.base_name = dn if fn in ("index.htm", "index.html") else self.name
+diff --git a/pelican/readers.py b/pelican/readers.py
+index 508d655..d87fdf6 100644
+--- a/pelican/readers.py
++++ b/pelican/readers.py
+@@ -6,6 +6,7 @@ from collections import OrderedDict
+ from html import escape
+ from html.parser import HTMLParser
+ from io import StringIO
++from pathlib import Path, PurePath
+ 
+ import docutils
+ import docutils.core
+@@ -17,7 +18,15 @@ from pelican import rstdirectives  # NOQA
+ from pelican.cache import FileStampDataCacher
+ from pelican.contents import Author, Category, Page, SkipStub, Tag
+ from pelican.plugins import signals
+-from pelican.utils import file_suffix, get_date, pelican_open, posixize_path
++from pelican.utils import (
++    absolute_path,
++    file_suffix,
++    get_date,
++    path_stem,
++    pelican_open,
++    posixize_path,
++    relative_path,
++)
+ 
+ try:
+     from markdown import Markdown
+@@ -585,8 +594,9 @@ class Readers(FileStampDataCacher):
+     ):
+         """Return a content object parsed with the given format."""
+ 
+-        path = os.path.abspath(os.path.join(base_path, path))
+-        source_path = posixize_path(os.path.relpath(path, base_path))
++        full_path = absolute_path(Path(base_path, path))
++        path = str(full_path)
++        source_path = relative_path(full_path, base_path).as_posix()
+         logger.debug("Read file %s -> %s", source_path, content_class.__name__)
+ 
+         if not fmt:
+@@ -733,6 +743,7 @@ def find_empty_alt(content, path):
+     for match in re.findall(imgs, content):
+         logger.warning(
+             "Empty alt attribute for image %s in %s",
++            # The image src is a URL, not a filesystem path.
+             os.path.basename(match[1] + match[5]),
+             path,
+             extra={"limit_msg": "Other images have empty alt attributes"},
+@@ -764,7 +775,7 @@ def path_metadata(full_path, source_path, settings=None):
+     if settings:
+         if settings.get("DEFAULT_DATE", None) == "fs":
+             metadata["date"] = datetime.datetime.fromtimestamp(
+-                os.stat(full_path).st_mtime
++                Path(full_path).stat().st_mtime
+             )
+             metadata["modified"] = metadata["date"]
+ 
+@@ -774,10 +785,15 @@ def path_metadata(full_path, source_path, settings=None):
+ 
+         epm = settings.get("EXTRA_PATH_METADATA", {})
+         for path, meta in sorted(epm.items()):
++            # Plain string handling: keys are matched as spelled against the
++            # posix source_path (the same identifier used by {filename} links),
++            # which pathlib would normalize (e.g. "./pages" never matched).
+             # Enforce a trailing slash when checking for parent directories.
+             # This prevents false positives when one file or directory's name
+             # is a prefix of another's.
+-            dirpath = posixize_path(os.path.join(path, ""))
++            dirpath = posixize_path(path)
++            if dirpath and not dirpath.endswith("/"):
++                dirpath += "/"
+             if source_path == path or source_path.startswith(dirpath):
+                 metadata.update(meta)
+ 
+@@ -804,9 +820,10 @@ def parse_path_metadata(source_path, settings=None, process=None):
+      'slug': 'my-slug'}
+     """
+     metadata = {}
+-    dirname, basename = os.path.split(source_path)
+-    base, ext = os.path.splitext(basename)
+-    subdir = os.path.basename(dirname)
++    base = path_stem(source_path)
++    # The directory holding the last component as spelled (as path_stem()
++    # does, appending a character makes that component a name pathlib keeps)
++    subdir = PurePath(source_path + "_").parent.name
+     if settings:
+         checks = []
+         for key, data in [("FILENAME_METADATA", base), ("PATH_METADATA", source_path)]:
+diff --git a/pelican/server.py b/pelican/server.py
+index 92b6ad7..2fddd2e 100644
+--- a/pelican/server.py
++++ b/pelican/server.py
+@@ -6,6 +6,7 @@ import ssl
+ import sys
+ import urllib
+ from http import server
++from pathlib import Path, PurePath
+ 
+ try:
+     from magic import from_file as magic_from_file
+@@ -14,6 +15,7 @@ except ImportError:
+ 
+ from pelican.log import console  # noqa: F401
+ from pelican.log import init as init_logging
++from pelican.utils import path_exists, path_extension, path_is_dir
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -68,15 +70,17 @@ class ComplexHTTPRequestHandler(server.SimpleHTTPRequestHandler):
+         # Don't forget explicit trailing slash when normalizing. Issue17324
+         trailing_slash = path.rstrip().endswith("/")
+         path = urllib.parse.unquote(path)
++        # path is the URL path here, not a filesystem path
+         path = posixpath.normpath(path)
+         words = path.split("/")
+         words = filter(None, words)
+-        path = self.base_path
++        fs_path = Path(self.base_path)
+         for word in words:
+-            if os.path.dirname(word) or word in (os.curdir, os.pardir):
++            if PurePath(word).name != word or word in (os.curdir, os.pardir):
+                 # Ignore components that are not a simple file/directory name
+                 continue
+-            path = os.path.join(path, word)
++            fs_path /= word
++        path = str(fs_path)
+         if trailing_slash:
+             path += "/"
+         return path
+@@ -104,7 +108,14 @@ class ComplexHTTPRequestHandler(server.SimpleHTTPRequestHandler):
+                 # so that base class can redirect if needed
+                 continue
+             path = original_path + suffix
+-            if os.path.exists(self.translate_path(path)):
++            fs_path = self.translate_path(path)
++            # translate_path() keeps a URL's trailing slash, which only matches
++            # a directory, but which pathlib would drop.
++            if fs_path.endswith("/"):
++                found = path_is_dir(fs_path)
++            else:
++                found = path_exists(fs_path)
++            if found:
+                 return path
+             tries.append(path)
+         logger.warning(
+@@ -122,7 +133,7 @@ class ComplexHTTPRequestHandler(server.SimpleHTTPRequestHandler):
+ 
+         # On some systems, JavaScript files are incorrectly assigned the "text/plain"
+         # MIME type in Python's mimetypes module. Override this behavior when it occurs.
+-        if posixpath.splitext(path)[1] == ".js" and mimetype == "text/plain":
++        if path_extension(path) == ".js" and mimetype == "text/plain":
+             mimetype = "text/javascript"
+ 
+         return mimetype
+diff --git a/pelican/settings.py b/pelican/settings.py
+index 45957fd..2b0b1c0 100644
+--- a/pelican/settings.py
++++ b/pelican/settings.py
+@@ -6,13 +6,19 @@ import logging
+ import os
+ import re
+ import sys
+-from os.path import isabs
+ from pathlib import Path
+ from types import ModuleType
+ from typing import Any
+ 
+ from pelican.log import LimitFilter
+ from pelican.paginator import PaginationRule
++from pelican.utils import (
++    absolute_path,
++    path_exists,
++    path_is_dir,
++    path_is_file,
++    path_stem,
++)
+ 
+ 
+ def load_source(name: str, path: str) -> ModuleType:
+@@ -27,9 +33,7 @@ logger = logging.getLogger(__name__)
+ 
+ Settings = dict[str, Any]
+ 
+-DEFAULT_THEME = os.path.join(
+-    os.path.dirname(os.path.abspath(__file__)), "themes", "notmyidea"
+-)
++DEFAULT_THEME = str(absolute_path(__file__).parent / "themes" / "notmyidea")
+ DEFAULT_CONFIG = {
+     "PATH": os.curdir,
+     "ARTICLE_PATHS": [""],
+@@ -198,19 +202,15 @@ def read_settings(
+     if path:
+         # Make relative paths absolute
+         def getabs(maybe_relative, base_path=path):
+-            if isabs(maybe_relative):
++            if Path(maybe_relative).is_absolute():
+                 return maybe_relative
+-            return os.path.abspath(
+-                os.path.normpath(
+-                    os.path.join(os.path.dirname(base_path), maybe_relative)
+-                )
+-            )
++            return str(absolute_path(Path(base_path).parent / maybe_relative))
+ 
+         for p in ["PATH", "OUTPUT_PATH", "THEME", "CACHE_PATH"]:
+             if settings.get(p) is not None:
+                 absp = getabs(settings[p])
+                 # THEME may be a name rather than a path
+-                if p != "THEME" or os.path.exists(absp):
++                if p != "THEME" or path_exists(absp):
+                     settings[p] = absp
+ 
+         if settings.get("PLUGIN_PATHS") is not None:
+@@ -242,7 +242,7 @@ def get_settings_from_module(module: ModuleType | None = None) -> Settings:
+ def get_settings_from_file(path: str) -> Settings:
+     """Loads settings from a file path, returning a dict."""
+ 
+-    name, ext = os.path.splitext(os.path.basename(path))
++    name = path_stem(path)
+     module = load_source(name, path)
+     return get_settings_from_module(module)
+ 
+@@ -537,6 +537,7 @@ def handle_deprecated_settings(settings: Settings) -> Settings:
+             "PAGE_SAVE_AS",
+             "PAGE_LANG_SAVE_AS",
+         ):
++            # Joins URL templates, not filesystem paths.
+             settings[setting] = os.path.join(structure, settings[setting])
+             logger.warning("%s = '%s'", setting, settings[setting])
+ 
+@@ -572,7 +573,8 @@ def configure_settings(settings: Settings) -> Settings:
+     settings.
+     Also, specify the log messages to be ignored.
+     """
+-    if "PATH" not in settings or not os.path.isdir(settings["PATH"]):
++    # An empty path names no directory (whereas Path("") is the current one)
++    if not settings.get("PATH") or not path_is_dir(settings["PATH"]):
+         raise ValueError(
+             "You need to specify a path containing the content"
+             " (see pelican --help for more information)"
+@@ -583,12 +585,10 @@ def configure_settings(settings: Settings) -> Settings:
+     LimitFilter._ignore.update(set(log_filter))
+ 
+     # lookup the theme in "pelican/themes" if the given one doesn't exist
+-    if not os.path.isdir(settings["THEME"]):
+-        theme_path = os.path.join(
+-            os.path.dirname(os.path.abspath(__file__)), "themes", settings["THEME"]
+-        )
+-        if os.path.exists(theme_path):
+-            settings["THEME"] = theme_path
++    if not settings["THEME"] or not path_is_dir(settings["THEME"]):
++        theme_path = absolute_path(__file__).parent / "themes" / settings["THEME"]
++        if path_exists(theme_path):
++            settings["THEME"] = str(theme_path)
+         else:
+             raise ValueError("Could not find the theme {}".format(settings["THEME"]))
+ 
+@@ -598,8 +598,7 @@ def configure_settings(settings: Settings) -> Settings:
+         theme = settings["THEME"]
+         static_paths = settings.get("THEME_STATIC_PATHS", ["static"])
+         if not any(
+-            os.path.isfile(os.path.join(theme, sp, "css", css_file))
+-            for sp in static_paths
++            path_is_file(Path(theme, sp, "css", css_file)) for sp in static_paths
+         ):
+             settings["CSS_FILE"] = ""
+ 
+diff --git a/pelican/tools/pelican_import.py b/pelican/tools/pelican_import.py
+index 1c03f9c..19ce0b3 100755
+--- a/pelican/tools/pelican_import.py
++++ b/pelican/tools/pelican_import.py
+@@ -13,6 +13,7 @@ import time
+ import urllib.request as urllib_request
+ from collections import defaultdict
+ from html import unescape
++from pathlib import Path, PurePath
+ from urllib.error import URLError
+ from urllib.parse import quote, urlparse, urlsplit, urlunsplit
+ from urllib.request import urlretrieve
+@@ -23,7 +24,14 @@ from docutils.utils import column_width
+ # because logging.setLoggerClass has to be called before logging.getLogger
+ from pelican.log import init
+ from pelican.settings import DEFAULT_CONFIG
+-from pelican.utils import SafeDatetime, slugify
++from pelican.utils import (
++    SafeDatetime,
++    path_basename,
++    path_exists,
++    path_is_dir,
++    path_stem,
++    slugify,
++)
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -238,6 +246,7 @@ def blogger2fields(xml):
+         try:
+             assert kind != "comment"
+             filename = entry.find("link", {"rel": "alternate"})["href"]
++            # filename is the post's URL here, not a filesystem path
+             filename = os.path.splitext(os.path.basename(filename))[0]
+         except (AssertionError, TypeError, KeyError):
+             filename = entry.find("id").string.split(".")[-1]
+@@ -651,8 +660,7 @@ def mediumpost2fields(filepath: str) -> tuple:
+ def medium_slug(filepath: str) -> str:
+     """Make the filepath of a medium exported file into a slug."""
+     # slug: filename without extension
+-    slug = os.path.basename(filepath)
+-    slug = os.path.splitext(slug)[0]
++    slug = path_stem(filepath)
+     # A medium export filename looks like date_-title-...html
+     # But, RST doesn't like "_-" (see https://github.com/sphinx-doc/sphinx/issues/4350)
+     # so get rid of it
+@@ -666,9 +674,8 @@ def medium_slug(filepath: str) -> str:
+ 
+ def mediumposts2fields(medium_export_dir: str):
+     """Take HTML posts in a medium export directory, and yield Pelican fields."""
+-    for file in os.listdir(medium_export_dir):
+-        filename = os.fsdecode(file)
+-        yield mediumpost2fields(os.path.join(medium_export_dir, filename))
++    for file in Path(medium_export_dir).iterdir():
++        yield mediumpost2fields(str(file))
+ 
+ 
+ def feed2fields(file):
+@@ -794,7 +801,7 @@ def get_out_filename(
+     wp_custpost,
+     slug_subs,
+ ):
+-    filename = os.path.basename(filename)
++    filename = path_basename(filename)
+ 
+     # Enforce filename restrictions for various filesystems at once; see
+     # https://en.wikipedia.org/wiki/Filename#Reserved_characters_and_words
+@@ -805,13 +812,13 @@ def get_out_filename(
+         filename = "_"
+     filename = filename[:249]  # allow for 5 extra characters
+ 
+-    out_filename = os.path.join(output_path, filename + ext)
++    out_filename = Path(output_path, filename + ext)
+     # option to put page posts in pages/ subdirectory
+     if dirpage and kind == "page":
+-        pages_dir = os.path.join(output_path, "pages")
+-        if not os.path.isdir(pages_dir):
+-            os.mkdir(pages_dir)
+-        out_filename = os.path.join(pages_dir, filename + ext)
++        pages_dir = Path(output_path, "pages")
++        if not path_is_dir(pages_dir):
++            pages_dir.mkdir()
++        out_filename = pages_dir / (filename + ext)
+     elif not dirpage and kind == "page":
+         pass
+     # option to put wp custom post types in directories with post type
+@@ -827,17 +834,17 @@ def get_out_filename(
+             catname = slugify(categories[0], regex_subs=slug_subs, preserve_case=True)
+         else:
+             catname = ""
+-        out_filename = os.path.join(output_path, typename, catname, filename + ext)
+-        if not os.path.isdir(os.path.join(output_path, typename, catname)):
+-            os.makedirs(os.path.join(output_path, typename, catname))
++        out_filename = Path(output_path, typename, catname, filename + ext)
++        if not path_is_dir(out_filename.parent):
++            out_filename.parent.mkdir(parents=True)
+     # option to put files in directories with categories names
+     elif dircat and (len(categories) > 0):
+         catname = slugify(categories[0], regex_subs=slug_subs, preserve_case=True)
+-        out_filename = os.path.join(output_path, catname, filename + ext)
+-        if not os.path.isdir(os.path.join(output_path, catname)):
+-            os.mkdir(os.path.join(output_path, catname))
++        out_filename = Path(output_path, catname, filename + ext)
++        if not path_is_dir(out_filename.parent):
++            out_filename.parent.mkdir()
+ 
+-    return out_filename
++    return str(out_filename)
+ 
+ 
+ def get_attachments(xml):
+@@ -881,14 +888,14 @@ def download_attachments(output_path, urls):
+     for url in urls:
+         path = urlparse(url).path
+         # teardown path and rebuild to negate any errors with
+-        # os.path.join and leading /'s
++        # joining leading /'s
+         path = path.split("/")
+         filename = path.pop(-1)
+-        localpath = ""
++        localpath = Path()
+         for item in path:
+             if sys.platform != "win32" or ":" not in item:
+-                localpath = os.path.join(localpath, item)
+-        full_path = os.path.join(output_path, localpath)
++                localpath /= item
++        full_path = Path(output_path, localpath)
+ 
+         # Generate percent-encoded URL
+         scheme, netloc, path, query, fragment = urlsplit(url)
+@@ -896,12 +903,12 @@ def download_attachments(output_path, urls):
+             path = quote(path)
+             url = urlunsplit((scheme, netloc, path, query, fragment))
+ 
+-        if not os.path.exists(full_path):
+-            os.makedirs(full_path)
++        if not path_exists(full_path):
++            full_path.mkdir(parents=True)
+         print(f"downloading {filename}")
+         try:
+-            urlretrieve(url, os.path.join(full_path, filename))
+-            locations[url] = os.path.join(localpath, filename)
++            urlretrieve(url, full_path / filename)
++            locations[url] = str(localpath / filename)
+         except (URLError, OSError) as e:
+             # Python 2.7 throws an IOError rather Than URLError
+             logger.warning("No file could be downloaded from %s\n%s", url, e)
+@@ -969,7 +976,7 @@ def fields2pelican(
+             posts_require_pandoc.append(filename)
+ 
+         slug = (not disable_slugs and filename) or None
+-        assert slug is None or filename == os.path.basename(filename), (
++        assert slug is None or filename == PurePath(filename).name, (
+             f"filename is not a basename: {filename}"
+         )
+ 
+@@ -1026,7 +1033,7 @@ def fields2pelican(
+ 
+         if in_markup in ("html", "wp-html"):
+             with tempfile.TemporaryDirectory() as tmpdir:
+-                html_filename = os.path.join(tmpdir, "pandoc-input.html")
++                html_filename = Path(tmpdir, "pandoc-input.html")
+                 # Replace newlines with paragraphs wrapped with <p> so
+                 # HTML is valid before conversion
+                 if in_markup == "wp-html":
+@@ -1221,9 +1228,10 @@ def main():
+         )
+         sys.exit(error)
+ 
+-    if not os.path.exists(args.output):
++    # An empty path names nothing (whereas Path("") is the current directory)
++    if not args.output or not path_exists(args.output):
+         try:
+-            os.mkdir(args.output)
++            Path(args.output).mkdir()
+         except OSError:
+             error = "Unable to create the output folder: " + args.output
+             sys.exit(error)
+diff --git a/pelican/tools/pelican_quickstart.py b/pelican/tools/pelican_quickstart.py
+index 7765716..69b4c20 100755
+--- a/pelican/tools/pelican_quickstart.py
++++ b/pelican/tools/pelican_quickstart.py
+@@ -4,6 +4,7 @@ import argparse
+ import locale
+ import os
+ from collections.abc import Mapping
++from pathlib import Path
+ 
+ from jinja2 import Environment, FileSystemLoader
+ 
+@@ -28,6 +29,7 @@ except ModuleNotFoundError:
+     _DEFAULT_TIMEZONE = "Europe/Rome"
+ 
+ from pelican import __version__
++from pelican.utils import absolute_path, expand_user, path_is_file
+ 
+ locale.setlocale(locale.LC_ALL, "")
+ try:
+@@ -40,7 +42,7 @@ if _DEFAULT_LANGUAGE is None:
+ else:
+     _DEFAULT_LANGUAGE = _DEFAULT_LANGUAGE.split("_")[0]
+ 
+-_TEMPLATES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
++_TEMPLATES_DIR = absolute_path(__file__).parent / "templates"
+ _jinja_env = Environment(
+     loader=FileSystemLoader(_TEMPLATES_DIR),
+     trim_blocks=True,
+@@ -174,9 +176,7 @@ def ask_timezone(question, default, tzurl):
+ 
+ def render_jinja_template(tmpl_name: str, tmpl_vars: Mapping, target_path: str):
+     try:
+-        with open(
+-            os.path.join(CONF["basedir"], target_path), "w", encoding="utf-8"
+-        ) as fd:
++        with Path(CONF["basedir"], target_path).open("w", encoding="utf-8") as fd:
+             _template = _jinja_env.get_template(tmpl_name)
+             fd.write(_template.render(**tmpl_vars))
+     except OSError as e:
+@@ -214,21 +214,23 @@ needed by Pelican.
+     """
+     )
+ 
+-    project = os.path.join(os.environ.get("VIRTUAL_ENV", os.curdir), ".project")
++    project = Path(os.environ.get("VIRTUAL_ENV", os.curdir), ".project")
+     no_path_was_specified = hasattr(args.path, "is_default_path")
+-    if os.path.isfile(project) and no_path_was_specified:
+-        CONF["basedir"] = open(project).read().rstrip("\n")
++    if path_is_file(project) and no_path_was_specified:
++        CONF["basedir"] = project.read_text().rstrip("\n")
+         print(
+             "Using project associated with current virtual environment. "
+             "Will save to:\n{}\n".format(CONF["basedir"])
+         )
+     else:
+-        CONF["basedir"] = os.path.abspath(
+-            os.path.expanduser(
+-                ask(
+-                    "Where do you want to create your new web site?",
+-                    answer=str,
+-                    default=args.path,
++        CONF["basedir"] = str(
++            absolute_path(
++                expand_user(
++                    ask(
++                        "Where do you want to create your new web site?",
++                        answer=str,
++                        default=args.path,
++                    )
+                 )
+             )
+         )
+@@ -374,12 +376,12 @@ needed by Pelican.
+                 CONF["github_pages_branch"] = _GITHUB_PAGES_BRANCHES["project"]
+ 
+     try:
+-        os.makedirs(os.path.join(CONF["basedir"], "content"))
++        Path(CONF["basedir"], "content").mkdir(parents=True)
+     except OSError as e:
+         print(f"Error: {e}")
+ 
+     try:
+-        os.makedirs(os.path.join(CONF["basedir"], "output"))
++        Path(CONF["basedir"], "output").mkdir(parents=True)
+     except OSError as e:
+         print(f"Error: {e}")
+ 
+diff --git a/pelican/tools/pelican_themes.py b/pelican/tools/pelican_themes.py
+index 29fd7a3..d21b0fa 100755
+--- a/pelican/tools/pelican_themes.py
++++ b/pelican/tools/pelican_themes.py
+@@ -4,6 +4,7 @@ import argparse
+ import os
+ import shutil
+ import sys
++from pathlib import Path
+ 
+ 
+ def err(msg, die=None):
+@@ -22,10 +23,18 @@ except ImportError:
+     )
+ 
+ 
+-_THEMES_PATH = os.path.join(
+-    os.path.dirname(os.path.abspath(pelican.__file__)), "themes"
++from pelican.utils import (  # noqa: E402
++    absolute_path,
++    normalize_path,
++    path_exists,
++    path_is_dir,
++    path_is_symlink,
++    real_path,
++    walk,
+ )
+ 
++_THEMES_PATH = str(absolute_path(pelican.__file__).parent / "themes")
++
+ __version__ = "0.2"
+ _BUILTIN_THEMES = ["simple", "notmyidea"]
+ 
+@@ -155,21 +164,19 @@ def main():
+ 
+ def themes():
+     """Returns the list of the themes"""
+-    for i in os.listdir(_THEMES_PATH):
+-        e = os.path.join(_THEMES_PATH, i)
+-
+-        if os.path.isdir(e):
+-            if os.path.islink(e):
+-                yield (e, os.readlink(e))
++    for e in Path(_THEMES_PATH).iterdir():
++        if path_is_dir(e):
++            if path_is_symlink(e):
++                yield (str(e), str(e.readlink()))
+             else:
+-                yield (e, None)
++                yield (str(e), None)
+ 
+ 
+ def list_themes(v=False):
+     """Display the list of the themes"""
+     for theme_path, link_target in themes():
+         if not v:
+-            theme_path = os.path.basename(theme_path)
++            theme_path = Path(theme_path).name
+         if link_target:
+             if v:
+                 print(theme_path + (" (symbolic link to `" + link_target + "')"))
+@@ -183,7 +190,8 @@ def remove(theme_name, v=False):
+     """Removes a theme"""
+ 
+     theme_name = theme_name.replace("/", "")
+-    target = os.path.join(_THEMES_PATH, theme_name)
++    target_path = Path(_THEMES_PATH, theme_name)
++    target = str(target_path)
+ 
+     if theme_name in _BUILTIN_THEMES:
+         err(
+@@ -191,15 +199,15 @@ def remove(theme_name, v=False):
+             "You cannot remove a builtin theme with this script, "
+             "remove it by hand if you want."
+         )
+-    elif os.path.islink(target):
++    elif path_is_symlink(target_path):
+         if v:
+             print("Removing link `" + target + "'")
+-        os.remove(target)
+-    elif os.path.isdir(target):
++        target_path.unlink()
++    elif path_is_dir(target_path):
+         if v:
+             print("Removing directory `" + target + "'")
+-        shutil.rmtree(target)
+-    elif os.path.exists(target):
++        shutil.rmtree(target_path)
++    elif path_exists(target_path):
+         err(target + " : not a valid theme")
+     else:
+         err(target + " : no such file or directory")
+@@ -207,14 +215,15 @@ def remove(theme_name, v=False):
+ 
+ def install(path, v=False, u=False):
+     """Installs a theme"""
+-    if not os.path.exists(path):
++    # An empty path names nothing (whereas Path("") is the current directory)
++    if not path or not path_exists(path):
+         err(path + " : no such file or directory")
+-    elif not os.path.isdir(path):
++    elif not path_is_dir(path):
+         err(path + " : not a directory")
+     else:
+-        theme_name = os.path.basename(os.path.normpath(path))
+-        theme_path = os.path.join(_THEMES_PATH, theme_name)
+-        exists = os.path.exists(theme_path)
++        theme_name = normalize_path(path).name
++        theme_path = Path(_THEMES_PATH, theme_name)
++        exists = path_exists(theme_path)
+         if exists and not u:
+             err(path + " : already exists")
+         elif exists:
+@@ -228,13 +237,11 @@ def install(path, v=False, u=False):
+ 
+                 try:
+                     if os.name == "posix":
+-                        for root, dirs, files in os.walk(theme_path):
++                        for root, dirs, files in walk(theme_path):
+                             for d in dirs:
+-                                dname = os.path.join(root, d)
+-                                os.chmod(dname, 493)  # 0o755
++                                (root / d).chmod(493)  # 0o755
+                             for f in files:
+-                                fname = os.path.join(root, f)
+-                                os.chmod(fname, 420)  # 0o644
++                                (root / f).chmod(420)  # 0o644
+                 except OSError as e:
+                     err(
+                         "Cannot change permissions of files "
+@@ -247,41 +254,40 @@ def install(path, v=False, u=False):
+ 
+ def symlink(path, v=False):
+     """Symbolically link a theme"""
+-    path = os.path.realpath(path)
+-    if not os.path.exists(path):
++    resolved_path = real_path(path)
++    path = str(resolved_path)
++    if not path_exists(resolved_path):
+         err(path + " : no such file or directory")
+-    elif not os.path.isdir(path):
++    elif not path_is_dir(resolved_path):
+         err(path + " : not a directory")
+     else:
+-        theme_name = os.path.basename(os.path.normpath(path))
+-        theme_path = os.path.join(_THEMES_PATH, theme_name)
+-        if os.path.exists(theme_path):
++        theme_name = resolved_path.name
++        theme_path = Path(_THEMES_PATH, theme_name)
++        if path_exists(theme_path):
+             err(path + " : already exists")
+         else:
+             if v:
+                 print(f"Linking `{path}' to `{theme_path}' ...")
+             try:
+-                os.symlink(path, theme_path)
++                theme_path.symlink_to(resolved_path)
+             except OSError as e:
+                 err(f"Cannot link `{path}' to `{theme_path}':\n{e!s}")
+ 
+ 
+ def is_broken_link(path):
+     """Returns True if the path given as is a broken symlink"""
+-    path = os.path.realpath(path)
+-    return not os.path.exists(path)
++    return not path_exists(real_path(path))
+ 
+ 
+ def clean(v=False):
+     """Removes the broken symbolic links"""
+     c = 0
+-    for path in os.listdir(_THEMES_PATH):
+-        path = os.path.join(_THEMES_PATH, path)
+-        if os.path.islink(path) and is_broken_link(path):
++    for path in Path(_THEMES_PATH).iterdir():
++        if path_is_symlink(path) and is_broken_link(path):
+             if v:
+                 print(f"Removing {path}")
+             try:
+-                os.remove(path)
++                path.unlink()
+             except OSError:
+                 print(f"Error: cannot remove {path}")
+             else:
+diff --git a/pelican/urlwrappers.py b/pelican/urlwrappers.py
+index 6eb952d..af5a4ac 100644
+--- a/pelican/urlwrappers.py
++++ b/pelican/urlwrappers.py
+@@ -123,6 +123,7 @@ class URLWrapper:
+             logger.warning("%s is set to %s", setting, value)
+             return value
+         elif get_page_name:
++            # value is a URL template, not a filesystem path.
+             return os.path.splitext(value)[0].format(**self.as_dict())
+         else:
+             return value.format(**self.as_dict())
+diff --git a/pelican/utils.py b/pelican/utils.py
+index 90d1a3f..f85d864 100644
+--- a/pelican/utils.py
++++ b/pelican/utils.py
+@@ -1,6 +1,7 @@
+ from __future__ import annotations
+ 
+ import datetime
++import errno
+ import fnmatch
+ import locale
+ import logging
+@@ -48,9 +49,190 @@ if TYPE_CHECKING:
+ logger = logging.getLogger(__name__)
+ 
+ 
+-def sanitised_join(base_directory: str, *parts: str) -> str:
+-    joined = posixize_path(os.path.abspath(os.path.join(base_directory, *parts)))
+-    base = posixize_path(os.path.abspath(base_directory))
++StrPath = str | os.PathLike[str]
++
++
++def normalize_path(path: StrPath) -> pathlib.Path:
++    """Lexically normalize a path, collapsing ``..`` components.
++
++    Equivalent to the old ``os.path.normpath()``: unlike ``Path.resolve()``,
++    it neither touches the filesystem nor follows symbolic links.
++    """
++    path = pathlib.Path(path)
++    parts: list[str] = []
++    for part in path.parts[1 if path.anchor else 0 :]:
++        if part != os.pardir:
++            parts.append(part)
++        elif parts and parts[-1] != os.pardir:
++            parts.pop()
++        elif not path.anchor:
++            parts.append(part)
++        # else: ".." at the root is the root itself
++    return pathlib.Path(path.anchor, *parts)
++
++
++def absolute_path(path: StrPath) -> pathlib.Path:
++    """Return a normalized absolute version of path.
++
++    Equivalent to the old ``os.path.abspath()``: unlike ``Path.resolve()``,
++    symbolic links are not followed.
++    """
++    return normalize_path(pathlib.Path(path).absolute())
++
++
++def relative_path(path: StrPath, start: StrPath = os.curdir) -> pathlib.Path:
++    """Return a relative path to path from the start directory.
++
++    Equivalent to the old ``os.path.relpath()``. ``Path.relative_to()`` can't
++    be used: it only walks up (``walk_up=True``) from Python 3.12 onwards.
++    """
++    path = absolute_path(path)
++    start = absolute_path(start)
++    if pathlib.PurePath(path.drive) != pathlib.PurePath(start.drive):
++        raise ValueError(f"path is on mount {path.drive!r}, start on {start.drive!r}")
++    # Both paths are absolute: compare what follows their anchors
++    path_parts = path.parts[1:]
++    start_parts = start.parts[1:]
++    common = 0
++    for path_part, start_part in zip(path_parts, start_parts, strict=False):
++        if pathlib.PurePath(path_part) != pathlib.PurePath(start_part):
++            break
++        common += 1
++    parents = [os.pardir] * (len(start_parts) - common)
++    return pathlib.Path(*parents, *path_parts[common:])
++
++
++def path_exists(path: StrPath) -> bool:
++    """Return whether path exists, without raising (like the old
++    ``os.path.exists()``): on Python 3.11, ``Path.exists()`` raises for errors
++    other than a missing file, such as a name too long or a permission denied.
++    """
++    try:
++        return pathlib.Path(path).exists()
++    except (OSError, ValueError):
++        return False
++
++
++def path_is_file(path: StrPath) -> bool:
++    """Return whether path is a regular file, without raising (see
++    ``path_exists()``)."""
++    try:
++        return pathlib.Path(path).is_file()
++    except (OSError, ValueError):
++        return False
++
++
++def path_is_dir(path: StrPath) -> bool:
++    """Return whether path is a directory, without raising (see
++    ``path_exists()``)."""
++    try:
++        return pathlib.Path(path).is_dir()
++    except (OSError, ValueError):
++        return False
++
++
++def path_is_symlink(path: StrPath) -> bool:
++    """Return whether path is a symbolic link, without raising (see
++    ``path_exists()``)."""
++    try:
++        return pathlib.Path(path).is_symlink()
++    except (OSError, ValueError):
++        return False
++
++
++def real_path(path: StrPath) -> pathlib.Path:
++    """Return the canonical path of path, resolving symbolic links.
++
++    Like the old ``os.path.realpath()``, this doesn't raise for a symbolic
++    link loop (``Path.resolve()`` does on Python 3.11), leaving it unresolved.
++    """
++    try:
++        return pathlib.Path(path).resolve()
++    except RuntimeError:
++        return absolute_path(path)
++
++
++def expand_user(path: StrPath) -> pathlib.Path:
++    """Expand a leading ``~`` or ``~user`` in path.
++
++    Like the old ``os.path.expanduser()``, path is returned unchanged if the
++    home directory can't be determined (``Path.expanduser()`` raises).
++    """
++    path = pathlib.Path(path)
++    try:
++        return path.expanduser()
++    except RuntimeError:
++        return path
++
++
++def is_normalized(path: StrPath) -> bool:
++    """Return whether path is spelled the way pathlib renders it.
++
++    That is, without "." components, nor doubled or trailing separators.
++    pathlib normalizes these away, but they changed how some path settings
++    were handled by the old ``os.path`` based code, which compared spellings.
++    """
++    if not isinstance(path, str):
++        return True
++    if os.altsep:
++        path = path.replace(os.altsep, os.sep)
++    # "" and "." are both rendered as ".", but joining them to a directory
++    # spells it differently: "dir" and "dir/." respectively.
++    return path == "" or (path != os.curdir and str(pathlib.PurePath(path)) == path)
++
++
++def path_basename(path: StrPath) -> str:
++    """Return the last component of path, like the old ``os.path.basename()``.
++
++    Unlike ``PurePath.name``, that is "" or "." for a string path spelled with
++    a trailing separator or "." component, which pathlib would skip. Such a
++    path never names a file.
++    """
++    if isinstance(path, str):
++        # Appending a character makes the last component a name pathlib keeps.
++        return pathlib.PurePath(path + "_").name[:-1]
++    return pathlib.PurePath(path).name
++
++
++def path_extension(path: StrPath) -> str:
++    """Return the extension of the last component of path, including the dot.
++
++    This follows the old ``os.path.splitext()`` rather than ``PurePath.suffix``,
++    which differs for names made of leading dots (``..md`` has no extension)
++    or ending with one (``foo.`` has the extension ``.``).
++    """
++    name = path_basename(path)
++    dot = name.rfind(".")
++    if dot > 0 and name[:dot].strip("."):
++        return name[dot:]
++    return ""
++
++
++def path_stem(path: StrPath) -> str:
++    """Return the last component of path, without its extension.
++
++    See ``path_extension()`` for how the extension is determined.
++    """
++    name = path_basename(path)
++    return name[: len(name) - len(path_extension(name))]
++
++
++def walk(
++    top: StrPath, followlinks: bool = False
++) -> Generator[tuple[pathlib.Path, list[str], list[str]]]:
++    """Walk a directory tree top-down, like ``os.walk()``, yielding Paths.
++
++    ``Path.walk()`` is only available from Python 3.12 onwards. As with
++    ``os.walk()``, the directory names list may be modified in place to prune
++    the walk.
++    """
++    for dirpath, dirnames, filenames in os.walk(top, followlinks=followlinks):
++        yield pathlib.Path(dirpath), dirnames, filenames
++
++
++def sanitised_join(base_directory: StrPath, *parts: StrPath) -> str:
++    joined = absolute_path(pathlib.Path(base_directory, *parts)).as_posix()
++    base = absolute_path(base_directory).as_posix()
+     if not joined.startswith(base):
+         raise RuntimeError(f"Attempted to break out of output directory to {joined}")
+ 
+@@ -292,7 +474,9 @@ def slugify(
+     return value.strip()
+ 
+ 
+-def copy(source: str, destination: str, ignores: Iterable[str] | None = None) -> None:
++def copy(
++    source: StrPath, destination: StrPath, ignores: Iterable[str] | None = None
++) -> None:
+     """Recursively copy source into destination.
+ 
+     If source is a file, destination has to be a file as well.
+@@ -303,40 +487,55 @@ def copy(source: str, destination: str, ignores: Iterable[str] | None = None) ->
+     :param ignores: either None, or a list of glob patterns;
+         files matching those patterns will _not_ be copied.
+     """
++    _copy(source, destination, ignores, path_basename(source))
++
++
++def _copy(
++    source: StrPath,
++    destination: StrPath,
++    ignores: Iterable[str] | None,
++    source_name: str,
++) -> None:
++    """Implement copy(), matching the ignores against source_name.
++
++    source_name is the last component of source as spelled by the caller,
++    which may be "" or "." (then matching no usual ignore pattern) where
++    pathlib normalized it away.
++    """
+ 
+     def walk_error(err):
+         logger.warning("While copying %s: %s: %s", source_, err.filename, err.strerror)
+ 
+-    source_ = os.path.abspath(os.path.expanduser(source))
+-    destination_ = os.path.abspath(os.path.expanduser(destination))
++    source_ = absolute_path(expand_user(source))
++    destination_ = absolute_path(expand_user(destination))
+ 
+     if ignores is None:
+         ignores = []
+ 
+-    if any(fnmatch.fnmatch(os.path.basename(source), ignore) for ignore in ignores):
++    if any(fnmatch.fnmatch(source_name, ignore) for ignore in ignores):
+         logger.info("Not copying %s due to ignores", source_)
+         return
+ 
+-    if os.path.isfile(source_):
+-        dst_dir = os.path.dirname(destination_)
+-        if not os.path.exists(dst_dir):
++    if path_is_file(source_):
++        dst_dir = destination_.parent
++        if not path_exists(dst_dir):
+             logger.info("Creating directory %s", dst_dir)
+-            os.makedirs(dst_dir)
++            dst_dir.mkdir(parents=True)
+         logger.info("Copying %s to %s", source_, destination_)
+         copy_file(source_, destination_)
+ 
+-    elif os.path.isdir(source_):
+-        if not os.path.exists(destination_):
++    elif path_is_dir(source_):
++        if not path_exists(destination_):
+             logger.info("Creating directory %s", destination_)
+-            os.makedirs(destination_)
+-        if not os.path.isdir(destination_):
++            destination_.mkdir(parents=True)
++        if not path_is_dir(destination_):
+             logger.warning(
+                 "Cannot copy %s (a directory) to %s (a file)", source_, destination_
+             )
+             return
+ 
+-        for src_dir, subdirs, others in os.walk(source_, followlinks=True):
+-            dst_dir = os.path.join(destination_, os.path.relpath(src_dir, source_))
++        for src_dir, subdirs, others in walk(source_, followlinks=True):
++            dst_dir = destination_ / relative_path(src_dir, source_)
+ 
+             subdirs[:] = (
+                 s for s in subdirs if not any(fnmatch.fnmatch(s, i) for i in ignores)
+@@ -345,15 +544,15 @@ def copy(source: str, destination: str, ignores: Iterable[str] | None = None) ->
+                 o for o in others if not any(fnmatch.fnmatch(o, i) for i in ignores)
+             )
+ 
+-            if not os.path.isdir(dst_dir):
++            if not path_is_dir(dst_dir):
+                 logger.info("Creating directory %s", dst_dir)
+                 # Parent directories are known to exist, so 'mkdir' suffices.
+-                os.mkdir(dst_dir)
++                dst_dir.mkdir()
+ 
+             for o in others:
+-                src_path = os.path.join(src_dir, o)
+-                dst_path = os.path.join(dst_dir, o)
+-                if os.path.isfile(src_path):
++                src_path = src_dir / o
++                dst_path = dst_dir / o
++                if path_is_file(src_path):
+                     logger.info("Copying %s to %s", src_path, dst_path)
+                     copy_file(src_path, dst_path)
+                 else:
+@@ -364,7 +563,7 @@ def copy(source: str, destination: str, ignores: Iterable[str] | None = None) ->
+                     )
+ 
+ 
+-def copy_file(source: str, destination: str) -> None:
++def copy_file(source: StrPath, destination: StrPath) -> None:
+     """Copy a file"""
+     try:
+         shutil.copyfile(source, destination)
+@@ -374,36 +573,38 @@ def copy_file(source: str, destination: str) -> None:
+         )
+ 
+ 
+-def clean_output_dir(path: str, retention: Iterable[str]) -> None:
++def clean_output_dir(path: StrPath, retention: Iterable[str]) -> None:
+     """Remove all files from output directory except those in retention list"""
+ 
+-    if not os.path.exists(path):
++    output_dir = pathlib.Path(path)
++    # An empty path names nothing (whereas Path("") is the current directory)
++    if not path or not path_exists(output_dir):
+         logger.debug("Directory already removed: %s", path)
+         return
+ 
+-    if not os.path.isdir(path):
++    if not path_is_dir(output_dir):
+         try:
+-            os.remove(path)
++            output_dir.unlink()
+         except OSError:
+             logger.exception("Unable to delete file %s", path)
+         return
+ 
+     # remove existing content from output folder unless in retention list
+-    for filename in os.listdir(path):
+-        file = os.path.join(path, filename)
++    for file in output_dir.iterdir():
++        filename = file.name
+         if any(filename == retain for retain in retention):
+             logger.debug(
+                 "Skipping deletion; %s is on retention list: %s", filename, file
+             )
+-        elif os.path.isdir(file):
++        elif path_is_dir(file):
+             try:
+                 shutil.rmtree(file)
+                 logger.debug("Deleted directory %s", file)
+             except OSError:
+                 logger.exception("Unable to delete directory %s", file)
+-        elif os.path.isfile(file) or os.path.islink(file):
++        elif path_is_file(file) or path_is_symlink(file):
+             try:
+-                os.remove(file)
++                file.unlink()
+                 logger.debug("Deleted file/link %s", file)
+             except OSError:
+                 logger.exception("Unable to delete file %s", file)
+@@ -418,7 +619,7 @@ def get_relative_path(path: str) -> str:
+         return os.curdir
+     else:
+         parents = [os.pardir] * (len(components) - 1)
+-        return os.path.join(*parents)
++        return str(pathlib.PurePath(*parents))
+ 
+ 
+ def path_to_url(path: str) -> str:
+@@ -432,6 +633,8 @@ def posixize_path(rel_path: str) -> str:
+     """Use '/' as path separator, so that source references,
+     like '{static}/foo/bar.jpg' or 'extras/favicon.ico',
+     will work on Windows as well as on Mac and Linux."""
++    # Plain string handling: the result is used as a URL path, and must keep
++    # whatever trailing separator or "." components rel_path was spelled with.
+     return rel_path.replace(os.sep, "/")
+ 
+ 
+@@ -811,7 +1014,7 @@ def order_content(
+ 
+             if order_by == "basename":
+                 content_list.sort(
+-                    key=lambda x: os.path.basename(x.source_path or ""),
++                    key=lambda x: pathlib.PurePath(x.source_path or "").name,
+                     reverse=order_reversed,
+                 )
+             else:
+@@ -856,7 +1059,8 @@ class FileChangeFilter(watchfiles.DefaultFilter):
+         https://watchfiles.helpmanual.io/api/filters/#watchfiles.DefaultFilter.ignore_dirs
+         """
+         return super().__call__(change, path) and not any(
+-            fnmatch.fnmatch(os.path.abspath(path), p) for p in self.ignore_file_patterns
++            fnmatch.fnmatch(str(absolute_path(path)), p)
++            for p in self.ignore_file_patterns
+         )
+ 
+ 
+@@ -875,15 +1079,18 @@ def wait_for_changes(
+     ]
+ 
+     candidate_paths.extend(
+-        os.path.join(content_path, path) for path in settings.get("STATIC_PATHS", [])
++        pathlib.Path(content_path, path)
++        for path in settings.get("STATIC_PATHS", [])
++        # joining two empty paths used to give an empty path, which is skipped
++        if content_path or path
+     )
+ 
+     watching_paths = []
+     for path in candidate_paths:
+         if not path:
+             continue
+-        path = os.path.abspath(path)
+-        if not os.path.exists(path):
++        path = absolute_path(path)
++        if not path_exists(path):
+             logger.warning("Unable to watch path '%s' as it does not exist.", path)
+         else:
+             watching_paths.append(path)
+@@ -910,30 +1117,34 @@ def set_date_tzinfo(
+     return d
+ 
+ 
+-def mkdir_p(path: str) -> None:
+-    os.makedirs(path, exist_ok=True)
++def mkdir_p(path: StrPath) -> None:
++    if not path:
++        # An empty path names no directory (Path("") is the current one)
++        raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), path)
++    pathlib.Path(path).mkdir(parents=True, exist_ok=True)
+ 
+ 
+ def split_all(path: str | pathlib.Path | None) -> Sequence[str] | None:
+     """Split a path into a list of components
+ 
+-    While os.path.split() splits a single component off the back of
++    While PurePath.name splits a single component off the back of
+     `path`, this function splits all components:
+ 
+-    >>> split_all(os.path.join('a', 'b', 'c'))
++    >>> split_all(str(pathlib.PurePath('a', 'b', 'c')))
+     ['a', 'b', 'c']
++
++    Unlike PurePath.parts, "." components of a string path are kept.
+     """
+     if isinstance(path, str):
+-        components = []
+         path = path.lstrip("/")
+-        while path:
+-            head, tail = os.path.split(path)
+-            if tail:
+-                components.insert(0, tail)
+-            elif head == path:
+-                components.insert(0, head)
+-                break
+-            path = head
++        anchor = pathlib.PurePath(path).anchor
++        # Plain string handling: PurePath would drop the "." components, which
++        # count towards the depth of output paths given to get_relative_path().
++        rest = path[len(anchor) :]
++        if os.altsep:
++            rest = rest.replace(os.altsep, os.sep)
++        components = [anchor] if anchor else []
++        components.extend(c for c in rest.split(os.sep) if c)
+         return components
+     elif isinstance(path, pathlib.Path):
+         return path.parts
+@@ -988,9 +1199,9 @@ def temporary_locale(
+     locale.setlocale(lc_category, orig_locale)
+ 
+ 
+-def file_suffix(path: str) -> str:
++def file_suffix(path: StrPath) -> str:
+     """Return the suffix of a filename in a path."""
+-    _, ext = os.path.splitext(os.path.basename(path))
++    ext = path_extension(path)
+     ret = ""
+     if len(ext) > 1:
+         # drop the ".", e.g., "exe", not ".exe"
+diff --git a/pelican/writers.py b/pelican/writers.py
+index 67d52ec..79ad023 100644
+--- a/pelican/writers.py
++++ b/pelican/writers.py
+@@ -1,6 +1,7 @@
+ import logging
+ import os
+-from posixpath import join as posix_join
++from pathlib import Path
++from posixpath import join as posix_join  # joins URLs, not filesystem paths
+ from urllib.parse import urljoin
+ 
+ from feedgenerator import Atom1Feed, Rss201rev2Feed, get_tag_uri
+@@ -171,7 +172,7 @@ class Writer:
+         if path:
+             complete_path = sanitised_join(self.output_path, path)
+ 
+-            os.makedirs(os.path.dirname(complete_path), exist_ok=True)
++            Path(complete_path).parent.mkdir(parents=True, exist_ok=True)
+ 
+             with self._open_w(complete_path, "utf-8", override_output) as fp:
+                 feed.write(fp, "utf-8")
+@@ -222,7 +223,7 @@ class Writer:
+             output = template.render(localcontext)
+             path = sanitised_join(output_path, name)
+ 
+-            os.makedirs(os.path.dirname(path), exist_ok=True)
++            Path(path).parent.mkdir(parents=True, exist_ok=True)
+ 
+             with self._open_w(path, "utf-8", override=override) as f:
+                 f.write(output)

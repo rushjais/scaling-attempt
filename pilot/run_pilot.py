@@ -59,10 +59,13 @@ def main():
 
     prompt = open(os.path.join(HERE, args.prompt)).read()
     container = "pelican-pilot-" + run_id
-    cmd = [DOCKER, "run", "--rm", "--name", container, "--user", f"{os.getuid()}:{os.getgid()}",
+    # The prompt goes in on stdin, not argv: with it in argv, an agent that killed
+    # "every process matching pelican" also killed its own Claude Code process
+    # (pilot run r2a-o55), because the prompt text starts with "Pelican".
+    cmd = [DOCKER, "run", "--rm", "-i", "--name", container, "--user", f"{os.getuid()}:{os.getgid()}",
            "--memory", "4g", "--cpus", "2", "-e", "CLAUDE_CODE_OAUTH_TOKEN",
            "-v", f"{repo}:/work/repo", "-w", "/work/repo", IMAGE,
-           "claude", "-p", prompt, "--output-format", "stream-json", "--verbose",
+           "claude", "-p", "--output-format", "stream-json", "--verbose",
            "--permission-mode", "dontAsk", "--allowedTools", ALLOWED, "--disallowedTools", DENIED,
            "--strict-mcp-config", "--setting-sources", "project", "--no-session-persistence",
            "--max-budget-usd", str(args.budget), "--append-system-prompt", HARNESS_NOTE,
@@ -72,7 +75,9 @@ def main():
     print(f"[{run_id}] workspace {repo}", flush=True)
     start, deadline = time.time(), time.time() + args.timeout * 60
     with open(os.path.join(out, "transcript.jsonl"), "w") as t, open(os.path.join(out, "stderr.txt"), "w") as e:
-        proc = subprocess.Popen(cmd, env=env, stdout=t, stderr=e)
+        proc = subprocess.Popen(cmd, env=env, stdin=subprocess.PIPE, stdout=t, stderr=e, text=True)
+        proc.stdin.write(prompt)
+        proc.stdin.close()
         while proc.poll() is None and time.time() < deadline:
             time.sleep(2)
         status = f"exit {proc.returncode}" if proc.poll() is not None else "timeout"

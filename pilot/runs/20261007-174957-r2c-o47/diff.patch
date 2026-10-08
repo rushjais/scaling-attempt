@@ -1,0 +1,1706 @@
+diff --git a/pelican/__init__.py b/pelican/__init__.py
+index a69e574..ed4819b 100644
+--- a/pelican/__init__.py
++++ b/pelican/__init__.py
+@@ -9,6 +9,7 @@ import sys
+ import time
+ import traceback
+ from collections.abc import Iterable
++from pathlib import Path
+ 
+ # Combines all paths to `pelican` package accessible from `sys.path`
+ # Makes it possible to install `pelican` and namespace plugins into different
+@@ -114,12 +115,11 @@ class Pelican:
+ 
+         # Delete the output directory if (1) the appropriate setting is True
+         # and (2) that directory is not the parent of the source directory
+-        if self.delete_outputdir and os.path.commonpath(
+-            [os.path.realpath(self.output_path)]
+-        ) != os.path.commonpath(
+-            [os.path.realpath(self.output_path), os.path.realpath(self.path)]
+-        ):
+-            clean_output_dir(self.output_path, self.output_retention)
++        if self.delete_outputdir:
++            resolved_output = Path(self.output_path).resolve()
++            resolved_input = Path(self.path).resolve()
++            if resolved_output not in (resolved_input, *resolved_input.parents):
++                clean_output_dir(self.output_path, self.output_retention)
+ 
+         for p in generators:
+             if hasattr(p, "generate_context"):
+@@ -521,12 +521,12 @@ def get_config(args):
+     """Builds a config dictionary based on supplied `args`."""
+     config = {}
+     if args.path:
+-        config["PATH"] = os.path.abspath(os.path.expanduser(args.path))
++        config["PATH"] = str(Path(args.path).expanduser().absolute())
+     if args.output:
+-        config["OUTPUT_PATH"] = os.path.abspath(os.path.expanduser(args.output))
++        config["OUTPUT_PATH"] = str(Path(args.output).expanduser().absolute())
+     if args.theme:
+-        abstheme = os.path.abspath(os.path.expanduser(args.theme))
+-        config["THEME"] = abstheme if os.path.exists(abstheme) else args.theme
++        abstheme = Path(args.theme).expanduser().absolute()
++        config["THEME"] = str(abstheme) if abstheme.exists() else args.theme
+     if args.delete_outputdir is not None:
+         config["DELETE_OUTPUT_DIRECTORY"] = args.delete_outputdir
+     if args.ignore_cache:
+@@ -547,7 +547,7 @@ def get_config(args):
+ 
+ def get_instance(args):
+     config_file = args.settings
+-    if config_file is None and os.path.isfile(DEFAULT_CONFIG_NAME):
++    if config_file is None and Path(DEFAULT_CONFIG_NAME).is_file():
+         config_file = DEFAULT_CONFIG_NAME
+         args.settings = DEFAULT_CONFIG_NAME
+ 
+@@ -568,7 +568,7 @@ def autoreload(args, excqueue=None):
+         " `settings` for changes. ---"
+     )
+     pelican, settings = get_instance(args)
+-    settings_file = os.path.abspath(args.settings)
++    settings_file = str(Path(args.settings).absolute())
+     while True:
+         try:
+             pelican.run()
+diff --git a/pelican/cache.py b/pelican/cache.py
+index 8bd3426..9f203d3 100644
+--- a/pelican/cache.py
++++ b/pelican/cache.py
+@@ -1,8 +1,8 @@
+ import gzip
+ import hashlib
+ import logging
+-import os
+ import pickle
++from pathlib import Path
+ 
+ from pelican.utils import mkdir_p
+ 
+@@ -20,7 +20,7 @@ class FileDataCacher:
+         Sets caching policy according to *caching_policy*.
+         """
+         self.settings = settings
+-        self._cache_path = os.path.join(self.settings["CACHE_PATH"], cache_name)
++        self._cache_path = Path(self.settings["CACHE_PATH"]) / cache_name
+         self._cache_data_policy = caching_policy
+         if self.settings["GZIP_CACHE"]:
+             self._cache_open = gzip.open
+@@ -88,14 +88,14 @@ class FileStampDataCacher(FileDataCacher):
+ 
+         method = self.settings["CHECK_MODIFIED_METHOD"]
+         if method == "mtime":
+-            self._filestamp_func = os.path.getmtime
++            self._filestamp_func = lambda filename: Path(filename).stat().st_mtime
+         else:
+             try:
+                 hash_func = getattr(hashlib, method)
+ 
+                 def filestamp_func(filename):
+                     """return hash of file contents"""
+-                    with open(filename, "rb") as fhandle:
++                    with Path(filename).open("rb") as fhandle:
+                         return hash_func(fhandle.read()).digest()
+ 
+                 self._filestamp_func = filestamp_func
+diff --git a/pelican/contents.py b/pelican/contents.py
+index 11459f7..0721143 100644
+--- a/pelican/contents.py
++++ b/pelican/contents.py
+@@ -2,9 +2,11 @@ import copy
+ import datetime
+ import locale
+ import logging
+-import os
++import os.path
++import posixpath
+ import re
+ from html import unescape
++from pathlib import Path
+ from typing import Any
+ from urllib.parse import ParseResult, unquote, urljoin, urlparse, urlunparse
+ 
+@@ -116,7 +118,7 @@ class Content:
+             if settings["SLUGIFY_SOURCE"] == "title" and hasattr(self, "title"):
+                 value = self.title
+             elif settings["SLUGIFY_SOURCE"] == "basename" and source_path is not None:
+-                value = os.path.basename(os.path.splitext(source_path)[0])
++                value = Path(source_path).stem
+             else:
+                 value = None
+             if value is not None:
+@@ -261,21 +263,22 @@ class Content:
+         origin = m.group("path")
+ 
+         # urllib.parse.urljoin() produces `a.html` for urljoin("..", "a.html")
+-        # so if RELATIVE_URLS are enabled, we fall back to os.path.join() to
+-        # properly get `../a.html`. However, os.path.join() produces
++        # so if RELATIVE_URLS are enabled, we fall back to posixpath.join() to
++        # properly get `../a.html`. However, posixpath.join() produces
+         # `baz/http://foo/bar.html` for join("baz", "http://foo/bar.html")
+         # instead of correct "http://foo/bar.html", so one has to pick a side
+         # as there is no silver bullet.
+         if self.settings["RELATIVE_URLS"]:
+-            joiner = os.path.join
++            # URL joining, not filesystem path joining.
++            joiner = posixpath.join
+         else:
+             joiner = urljoin
+ 
+             # However, it's not *that* simple: urljoin("blog", "index.html")
+             # produces just `index.html` instead of `blog/index.html` (unlike
+-            # os.path.join()), so in order to get a correct answer one needs to
+-            # append a trailing slash to siteurl in that case. This also makes
+-            # the new behavior fully compatible with Pelican 3.7.1.
++            # posixpath.join()), so in order to get a correct answer one needs
++            # to append a trailing slash to siteurl in that case. This also
++            # makes the new behavior fully compatible with Pelican 3.7.1.
+             if not siteurl.endswith("/"):
+                 siteurl += "/"
+ 
+@@ -291,7 +294,7 @@ class Content:
+                     else:
+                         # relative to the source path of this content
+                         path = self.get_relative_source_path(  # type: ignore
+-                            os.path.join(self.relative_dir, path)
++                            str(Path(self.relative_dir) / path)
+                         )
+                     return self._context[key].get(path, None)
+ 
+@@ -410,7 +413,7 @@ class Content:
+             else:
+                 # relative to the source path of this content
+                 path = self.get_relative_source_path(
+-                    os.path.join(self.relative_dir, path)
++                    str(Path(self.relative_dir) / path)
+                 )
+             path = path.replace("%20", " ")  # type: ignore
+             static_links.add(path)
+@@ -513,23 +516,18 @@ class Content:
+         if source_path is None:
+             return None
+ 
+-        return posixize_path(
+-            os.path.relpath(
+-                os.path.abspath(os.path.join(self.settings["PATH"], source_path)),
+-                os.path.abspath(self.settings["PATH"]),
+-            )
+-        )
++        base = Path(self.settings["PATH"]).absolute()
++        full = (base / source_path).absolute()
++        # os.path.relpath is used (rather than Path.relative_to) because the
++        # result may walk upward with "..", which Path.relative_to only
++        # supports on Python 3.12+ via walk_up=True.
++        return posixize_path(os.path.relpath(full, base))
+ 
+     @property
+     def relative_dir(self) -> str:
+-        return posixize_path(
+-            os.path.dirname(
+-                os.path.relpath(
+-                    os.path.abspath(self.source_path),
+-                    os.path.abspath(self.settings["PATH"]),
+-                )
+-            )
+-        )
++        base = Path(self.settings["PATH"]).absolute()
++        full = Path(self.source_path).absolute()
++        return posixize_path(Path(os.path.relpath(full, base)).parent)
+ 
+     def refresh_metadata_intersite_links(self) -> None:
+         for key in self.settings["FORMATTED_FIELDS"]:
+@@ -651,11 +649,13 @@ class Static(Content):
+         # document's source directory, preserve that relationship on output.
+         # Otherwise, make it a sibling.
+ 
+-        linking_source_dir = os.path.dirname(content.source_path)
++        linking_source_dir = Path(content.source_path).parent
++        # os.path.relpath may return a path that walks up with "..";
++        # Path.relative_to only supports that on Python 3.12+.
+         tail_path = os.path.relpath(self.source_path, linking_source_dir)
+-        if tail_path.startswith(os.pardir + os.sep):
+-            tail_path = os.path.basename(tail_path)
+-        new_save_as = os.path.join(os.path.dirname(content.save_as), tail_path)
++        if tail_path.startswith(f"..{os.sep}"):
++            tail_path = Path(tail_path).name
++        new_save_as = str(Path(content.save_as).parent / tail_path)
+ 
+         # We do not build our new url by joining tail_path with the linking
+         # document's url, because we cannot know just by looking at the latter
+diff --git a/pelican/generators.py b/pelican/generators.py
+index 515257c..2f745d0 100644
+--- a/pelican/generators.py
++++ b/pelican/generators.py
+@@ -3,10 +3,12 @@ import errno
+ import fnmatch
+ import logging
+ import os
++import posixpath
+ from collections import defaultdict
+ from functools import partial
+ from itertools import chain, groupby
+ from operator import attrgetter
++from pathlib import Path
+ 
+ from jinja2 import (
+     BaseLoader,
+@@ -67,13 +69,13 @@ class Generator:
+         self._templates = {}
+         self._templates_path = list(self.settings["THEME_TEMPLATES_OVERRIDES"])
+ 
+-        theme_templates_path = os.path.expanduser(os.path.join(self.theme, "templates"))
+-        self._templates_path.append(theme_templates_path)
++        theme_templates_path = (Path(self.theme) / "templates").expanduser()
++        self._templates_path.append(str(theme_templates_path))
+         theme_loader = FileSystemLoader(theme_templates_path)
+ 
+-        simple_theme_path = os.path.dirname(os.path.abspath(__file__))
++        simple_theme_path = Path(__file__).resolve().parent
+         simple_loader = FileSystemLoader(
+-            os.path.join(simple_theme_path, "themes", "simple", "templates")
++            simple_theme_path / "themes" / "simple" / "templates"
+         )
+ 
+         self.env = Environment(
+@@ -144,14 +146,15 @@ class Generator:
+         """
+         if extensions is None:
+             extensions = tuple(self.readers.extensions)
+-        basename = os.path.basename(path)
++        p = Path(path)
++        basename = p.name
+ 
+         # check IGNORE_FILES
+         ignores = self.settings["IGNORE_FILES"]
+         if any(fnmatch.fnmatch(basename, ignore) for ignore in ignores):
+             return False
+ 
+-        ext = os.path.splitext(basename)[1][1:]
++        ext = p.suffix[1:]
+         if extensions is False or ext in extensions:
+             return True
+ 
+@@ -175,17 +178,20 @@ class Generator:
+ 
+         # group the exclude dir names by parent path, for use with os.walk()
+         exclusions_by_dirpath = {}
++        base = Path(self.path)
+         for e in exclude:
+-            parent_path, subdir = os.path.split(os.path.join(self.path, e))
+-            exclusions_by_dirpath.setdefault(parent_path, set()).add(subdir)
++            full = base / e
++            exclusions_by_dirpath.setdefault(str(full.parent), set()).add(full.name)
+ 
+         files = set()
+         ignores = self.settings["IGNORE_FILES"]
+         for path in paths:
+-            # careful: os.path.join() will add a slash when path == ''.
+-            root = os.path.join(self.path, path) if path else self.path
++            # careful: joining self.path with "" would add a trailing separator.
++            root = base / path if path else base
+ 
+-            if os.path.isdir(root):
++            if root.is_dir():
++                # os.walk is used because pathlib.Path.walk requires Python
++                # 3.12+ and Pelican supports 3.11.
+                 for dirpath, dirs, temp_files in os.walk(
+                     root, topdown=True, followlinks=True
+                 ):
+@@ -198,12 +204,12 @@ class Generator:
+                             if d in dirs:
+                                 dirs.remove(d)
+ 
+-                    reldir = os.path.relpath(dirpath, self.path)
++                    reldir = Path(dirpath).relative_to(base)
+                     for f in temp_files:
+-                        fp = os.path.join(reldir, f)
++                        fp = str(reldir / f)
+                         if self._include_path(fp, extensions):
+                             files.add(fp)
+-            elif os.path.exists(root) and self._include_path(path, extensions):
++            elif root.exists() and self._include_path(path, extensions):
+                 files.add(path)  # can't walk non-directories
+         return files
+ 
+@@ -221,7 +227,7 @@ class Generator:
+         The path argument is expected to be relative to self.path.
+         """
+         key = "static_content" if static else "generated_content"
+-        self.context[key][posixize_path(os.path.normpath(path))] = None
++        self.context[key][posixize_path(Path(path))] = None
+ 
+     def _is_potential_source_path(self, path, static=False):
+         """Return True if path was supposed to be used as a source file.
+@@ -230,7 +236,7 @@ class Generator:
+         The path argument is expected to be relative to self.path.
+         """
+         key = "static_content" if static else "generated_content"
+-        return posixize_path(os.path.normpath(path)) in self.context[key]
++        return posixize_path(Path(path)) in self.context[key]
+ 
+     def add_static_links(self, content):
+         """Add file links in content to context to be processed as Static
+@@ -286,23 +292,27 @@ class CachingGenerator(Generator, FileStampDataCacher):
+ 
+     def _get_file_stamp(self, filename):
+         """Get filestamp for path relative to generator.path"""
+-        filename = os.path.join(self.path, filename)
++        filename = Path(self.path) / filename
+         return super()._get_file_stamp(filename)
+ 
+ 
+ class _FileLoader(BaseLoader):
+     def __init__(self, path, basedir):
+         self.path = path
+-        self.fullpath = os.path.join(basedir, path)
++        self.fullpath = Path(basedir) / path
+ 
+     def get_source(self, environment, template):
+         del environment  # Unused argument
+-        if template != self.path or not os.path.exists(self.fullpath):
++        if template != self.path or not self.fullpath.exists():
+             raise TemplateNotFound(template)
+-        mtime = os.path.getmtime(self.fullpath)
+-        with open(self.fullpath, encoding="utf-8") as f:
++        mtime = self.fullpath.stat().st_mtime
++        with self.fullpath.open(encoding="utf-8") as f:
+             source = f.read()
+-        return (source, self.fullpath, lambda: mtime == os.path.getmtime(self.fullpath))
++        return (
++            source,
++            str(self.fullpath),
++            lambda: mtime == self.fullpath.stat().st_mtime,
++        )
+ 
+ 
+ class TemplatePagesGenerator(Generator):
+@@ -562,7 +572,8 @@ class ArticlesGenerator(CachingGenerator):
+                 dates=self.dates,
+                 blog=True,
+                 template_name=template,
+-                page_name=os.path.splitext(save_as)[0],
++                # save_as is a URL template, not a filesystem path.
++                page_name=posixpath.splitext(save_as)[0],
+                 url=url,
+             )
+ 
+@@ -1074,35 +1085,33 @@ class StaticGenerator(Generator):
+ 
+     def _copy_paths(self, paths, source, destination, output_path, final_path=None):
+         """Copy all the paths from source to destination"""
++        source = Path(source)
++        output_path = Path(output_path)
+         for path in paths:
+-            source_path = os.path.join(source, path)
++            source_path = source / path
+ 
+             if final_path:
+-                if os.path.isfile(source_path):
+-                    destination_path = os.path.join(
+-                        output_path, destination, final_path, os.path.basename(path)
++                if source_path.is_file():
++                    destination_path = (
++                        output_path / destination / final_path / Path(path).name
+                     )
+                 else:
+-                    destination_path = os.path.join(
+-                        output_path, destination, final_path
+-                    )
++                    destination_path = output_path / destination / final_path
+             else:
+-                destination_path = os.path.join(output_path, destination, path)
++                destination_path = output_path / destination / path
+ 
+             copy(source_path, destination_path, self.settings["IGNORE_FILES"])
+ 
+     def _file_update_required(self, staticfile):
+-        source_path = os.path.join(self.path, staticfile.source_path)
+-        save_as = os.path.join(self.output_path, staticfile.save_as)
+-        if not os.path.exists(save_as):
++        source_path = Path(self.path) / staticfile.source_path
++        save_as = Path(self.output_path) / staticfile.save_as
++        if not save_as.exists():
+             return True
+-        elif self.settings["STATIC_CREATE_LINKS"] and os.path.samefile(
+-            source_path, save_as
+-        ):
++        elif self.settings["STATIC_CREATE_LINKS"] and save_as.samefile(source_path):
+             return False
+         elif (
+             self.settings["STATIC_CREATE_LINKS"]
+-            and os.path.realpath(save_as) == source_path
++            and save_as.resolve() == source_path
+         ):
+             return False
+         elif not self.settings["STATIC_CHECK_IF_MODIFIED"]:
+@@ -1111,10 +1120,10 @@ class StaticGenerator(Generator):
+             return self._source_is_newer(staticfile)
+ 
+     def _source_is_newer(self, staticfile):
+-        source_path = os.path.join(self.path, staticfile.source_path)
+-        save_as = os.path.join(self.output_path, staticfile.save_as)
+-        s_mtime = os.path.getmtime(source_path)
+-        d_mtime = os.path.getmtime(save_as)
++        source_path = Path(self.path) / staticfile.source_path
++        save_as = Path(self.output_path) / staticfile.save_as
++        s_mtime = source_path.stat().st_mtime
++        d_mtime = save_as.stat().st_mtime
+         return s_mtime - d_mtime > 0.000001  # noqa: PLR2004
+ 
+     def _link_or_copy_staticfile(self, sc):
+@@ -1124,22 +1133,22 @@ class StaticGenerator(Generator):
+             self._copy_staticfile(sc)
+ 
+     def _copy_staticfile(self, sc):
+-        source_path = os.path.join(self.path, sc.source_path)
+-        save_as = os.path.join(self.output_path, sc.save_as)
+-        self._mkdir(os.path.dirname(save_as))
++        source_path = Path(self.path) / sc.source_path
++        save_as = Path(self.output_path) / sc.save_as
++        self._mkdir(save_as.parent)
+         copy(source_path, save_as)
+         logger.info("Copying %s to %s", sc.source_path, sc.save_as)
+ 
+     def _link_staticfile(self, sc):
+-        source_path = os.path.join(self.path, sc.source_path)
+-        save_as = os.path.join(self.output_path, sc.save_as)
+-        self._mkdir(os.path.dirname(save_as))
++        source_path = Path(self.path) / sc.source_path
++        save_as = Path(self.output_path) / sc.save_as
++        self._mkdir(save_as.parent)
+         try:
+-            if os.path.lexists(save_as):
+-                os.unlink(save_as)
++            if save_as.is_symlink() or save_as.exists():
++                save_as.unlink()
+             logger.info("Linking %s and %s", sc.source_path, sc.save_as)
+             if self.fallback_to_symlinks:
+-                os.symlink(source_path, save_as)
++                save_as.symlink_to(source_path)
+             else:
+                 os.link(source_path, save_as)
+         except OSError as err:
+@@ -1153,8 +1162,9 @@ class StaticGenerator(Generator):
+                 raise err
+ 
+     def _mkdir(self, path):
+-        if os.path.lexists(path) and not os.path.isdir(path):
+-            os.unlink(path)
++        path = Path(path)
++        if (path.is_symlink() or path.exists()) and not path.is_dir():
++            path.unlink()
+         mkdir_p(path)
+ 
+ 
+@@ -1163,8 +1173,9 @@ class SourceFileGenerator(Generator):
+         self.output_extension = self.settings["OUTPUT_SOURCES_EXTENSION"]
+ 
+     def _create_source(self, obj):
+-        output_path, _ = os.path.splitext(obj.save_as)
+-        dest = os.path.join(self.output_path, output_path + self.output_extension)
++        # obj.save_as is a URL/output template, not a filesystem path.
++        output_path, _ = posixpath.splitext(obj.save_as)
++        dest = Path(self.output_path) / (output_path + self.output_extension)
+         copy(obj.source_path, dest)
+ 
+     def generate_output(self, writer=None):
+diff --git a/pelican/paginator.py b/pelican/paginator.py
+index 9dcbb9d..3f5062d 100644
+--- a/pelican/paginator.py
++++ b/pelican/paginator.py
+@@ -1,6 +1,6 @@
+ import functools
+ import logging
+-import os
++import posixpath
+ from collections import namedtuple
+ from math import ceil
+ 
+@@ -71,8 +71,10 @@ class Paginator:
+ class Page:
+     def __init__(self, name, url, object_list, number, paginator, settings):
+         self.full_name = name
+-        self.name, self.extension = os.path.splitext(name)
+-        dn, fn = os.path.split(name)
++        # `name` and `url` are URL/path templates (always `/`-separated), not
++        # filesystem paths; use posixpath to split them.
++        self.name, self.extension = posixpath.splitext(name)
++        dn, fn = posixpath.split(name)
+         self.base_name = dn if fn in ("index.htm", "index.html") else self.name
+         self.base_url = url
+         self.object_list = object_list
+diff --git a/pelican/readers.py b/pelican/readers.py
+index 508d655..6ad0094 100644
+--- a/pelican/readers.py
++++ b/pelican/readers.py
+@@ -1,11 +1,12 @@
+ import datetime
+ import logging
+-import os
++import os.path
+ import re
+ from collections import OrderedDict
+ from html import escape
+ from html.parser import HTMLParser
+ from io import StringIO
++from pathlib import Path
+ 
+ import docutils
+ import docutils.core
+@@ -585,7 +586,14 @@ class Readers(FileStampDataCacher):
+     ):
+         """Return a content object parsed with the given format."""
+ 
+-        path = os.path.abspath(os.path.join(base_path, path))
++        # os.path.abspath is used (rather than Path.resolve) because
++        # resolve() follows symlinks whereas abspath only normalises the
++        # path; preserving the non-symlink-following behaviour is important
++        # for cached lookups and source paths.
++        path = os.path.abspath(Path(base_path) / path)
++        # os.path.relpath is used (rather than Path.relative_to) because the
++        # relative path may need to walk upward with "..", which
++        # Path.relative_to only supports on Python 3.12+ via walk_up=True.
+         source_path = posixize_path(os.path.relpath(path, base_path))
+         logger.debug("Read file %s -> %s", source_path, content_class.__name__)
+ 
+@@ -733,7 +741,7 @@ def find_empty_alt(content, path):
+     for match in re.findall(imgs, content):
+         logger.warning(
+             "Empty alt attribute for image %s in %s",
+-            os.path.basename(match[1] + match[5]),
++            Path(match[1] + match[5]).name,
+             path,
+             extra={"limit_msg": "Other images have empty alt attributes"},
+         )
+@@ -764,7 +772,7 @@ def path_metadata(full_path, source_path, settings=None):
+     if settings:
+         if settings.get("DEFAULT_DATE", None) == "fs":
+             metadata["date"] = datetime.datetime.fromtimestamp(
+-                os.stat(full_path).st_mtime
++                Path(full_path).stat().st_mtime
+             )
+             metadata["modified"] = metadata["date"]
+ 
+@@ -777,7 +785,7 @@ def path_metadata(full_path, source_path, settings=None):
+             # Enforce a trailing slash when checking for parent directories.
+             # This prevents false positives when one file or directory's name
+             # is a prefix of another's.
+-            dirpath = posixize_path(os.path.join(path, ""))
++            dirpath = posixize_path(path) + "/" if path else ""
+             if source_path == path or source_path.startswith(dirpath):
+                 metadata.update(meta)
+ 
+@@ -804,9 +812,10 @@ def parse_path_metadata(source_path, settings=None, process=None):
+      'slug': 'my-slug'}
+     """
+     metadata = {}
+-    dirname, basename = os.path.split(source_path)
+-    base, ext = os.path.splitext(basename)
+-    subdir = os.path.basename(dirname)
++    source = Path(source_path)
++    basename = source.name
++    base = source.stem
++    subdir = source.parent.name
+     if settings:
+         checks = []
+         for key, data in [("FILENAME_METADATA", base), ("PATH_METADATA", source_path)]:
+diff --git a/pelican/server.py b/pelican/server.py
+index 92b6ad7..20acb18 100644
+--- a/pelican/server.py
++++ b/pelican/server.py
+@@ -6,6 +6,7 @@ import ssl
+ import sys
+ import urllib
+ from http import server
++from pathlib import Path
+ 
+ try:
+     from magic import from_file as magic_from_file
+@@ -61,25 +62,27 @@ class ComplexHTTPRequestHandler(server.SimpleHTTPRequestHandler):
+         ".woff2": "font/woff2",
+     }
+ 
+-    def translate_path(self, path):
++    def translate_path(self, url_path):
+         # abandon query parameters
+-        path = path.split("?", 1)[0]
+-        path = path.split("#", 1)[0]
++        url_path = url_path.split("?", 1)[0]
++        url_path = url_path.split("#", 1)[0]
+         # Don't forget explicit trailing slash when normalizing. Issue17324
+-        trailing_slash = path.rstrip().endswith("/")
+-        path = urllib.parse.unquote(path)
+-        path = posixpath.normpath(path)
+-        words = path.split("/")
+-        words = filter(None, words)
+-        path = self.base_path
++        trailing_slash = url_path.rstrip().endswith("/")
++        url_path = urllib.parse.unquote(url_path)
++        # URL path manipulation: use posixpath since URL separators are "/".
++        url_path = posixpath.normpath(url_path)
++        words = filter(None, url_path.split("/"))
++        path = Path(self.base_path)
+         for word in words:
+-            if os.path.dirname(word) or word in (os.curdir, os.pardir):
+-                # Ignore components that are not a simple file/directory name
++            # Reject any component that itself contains a separator or is
++            # the current/parent-directory marker.
++            if Path(word).name != word or word in (os.curdir, os.pardir):
+                 continue
+-            path = os.path.join(path, word)
++            path = path / word
++        result = str(path)
+         if trailing_slash:
+-            path += "/"
+-        return path
++            result += "/"
++        return result
+ 
+     def do_GET(self):
+         # cut off a query string
+@@ -104,7 +107,7 @@ class ComplexHTTPRequestHandler(server.SimpleHTTPRequestHandler):
+                 # so that base class can redirect if needed
+                 continue
+             path = original_path + suffix
+-            if os.path.exists(self.translate_path(path)):
++            if Path(self.translate_path(path)).exists():
+                 return path
+             tries.append(path)
+         logger.warning(
+diff --git a/pelican/settings.py b/pelican/settings.py
+index 45957fd..87bdfe8 100644
+--- a/pelican/settings.py
++++ b/pelican/settings.py
+@@ -6,7 +6,6 @@ import logging
+ import os
+ import re
+ import sys
+-from os.path import isabs
+ from pathlib import Path
+ from types import ModuleType
+ from typing import Any
+@@ -15,7 +14,7 @@ from pelican.log import LimitFilter
+ from pelican.paginator import PaginationRule
+ 
+ 
+-def load_source(name: str, path: str) -> ModuleType:
++def load_source(name: str, path: str | os.PathLike) -> ModuleType:
+     spec = importlib.util.spec_from_file_location(name, path)
+     mod = importlib.util.module_from_spec(spec)
+     sys.modules[name] = mod
+@@ -27,9 +26,7 @@ logger = logging.getLogger(__name__)
+ 
+ Settings = dict[str, Any]
+ 
+-DEFAULT_THEME = os.path.join(
+-    os.path.dirname(os.path.abspath(__file__)), "themes", "notmyidea"
+-)
++DEFAULT_THEME = str(Path(__file__).resolve().parent / "themes" / "notmyidea")
+ DEFAULT_CONFIG = {
+     "PATH": os.curdir,
+     "ARTICLE_PATHS": [""],
+@@ -197,20 +194,19 @@ def read_settings(
+ 
+     if path:
+         # Make relative paths absolute
+-        def getabs(maybe_relative, base_path=path):
+-            if isabs(maybe_relative):
+-                return maybe_relative
+-            return os.path.abspath(
+-                os.path.normpath(
+-                    os.path.join(os.path.dirname(base_path), maybe_relative)
+-                )
+-            )
++        base_dir = Path(path).parent
++
++        def getabs(maybe_relative, base=base_dir):
++            maybe_relative = Path(maybe_relative)
++            if maybe_relative.is_absolute():
++                return str(maybe_relative)
++            return str((base / maybe_relative).resolve())
+ 
+         for p in ["PATH", "OUTPUT_PATH", "THEME", "CACHE_PATH"]:
+             if settings.get(p) is not None:
+                 absp = getabs(settings[p])
+                 # THEME may be a name rather than a path
+-                if p != "THEME" or os.path.exists(absp):
++                if p != "THEME" or Path(absp).exists():
+                     settings[p] = absp
+ 
+         if settings.get("PLUGIN_PATHS") is not None:
+@@ -239,10 +235,10 @@ def get_settings_from_module(module: ModuleType | None = None) -> Settings:
+     return context
+ 
+ 
+-def get_settings_from_file(path: str) -> Settings:
++def get_settings_from_file(path: str | os.PathLike) -> Settings:
+     """Loads settings from a file path, returning a dict."""
+ 
+-    name, ext = os.path.splitext(os.path.basename(path))
++    name = Path(path).stem
+     module = load_source(name, path)
+     return get_settings_from_module(module)
+ 
+@@ -537,6 +533,7 @@ def handle_deprecated_settings(settings: Settings) -> Settings:
+             "PAGE_SAVE_AS",
+             "PAGE_LANG_SAVE_AS",
+         ):
++            # URL template, not a filesystem path
+             settings[setting] = os.path.join(structure, settings[setting])
+             logger.warning("%s = '%s'", setting, settings[setting])
+ 
+@@ -572,7 +569,11 @@ def configure_settings(settings: Settings) -> Settings:
+     settings.
+     Also, specify the log messages to be ignored.
+     """
+-    if "PATH" not in settings or not os.path.isdir(settings["PATH"]):
++    if (
++        "PATH" not in settings
++        or not settings["PATH"]
++        or not Path(settings["PATH"]).is_dir()
++    ):
+         raise ValueError(
+             "You need to specify a path containing the content"
+             " (see pelican --help for more information)"
+@@ -583,23 +584,20 @@ def configure_settings(settings: Settings) -> Settings:
+     LimitFilter._ignore.update(set(log_filter))
+ 
+     # lookup the theme in "pelican/themes" if the given one doesn't exist
+-    if not os.path.isdir(settings["THEME"]):
+-        theme_path = os.path.join(
+-            os.path.dirname(os.path.abspath(__file__)), "themes", settings["THEME"]
+-        )
+-        if os.path.exists(theme_path):
+-            settings["THEME"] = theme_path
++    if not Path(settings["THEME"]).is_dir():
++        theme_path = Path(__file__).resolve().parent / "themes" / settings["THEME"]
++        if theme_path.exists():
++            settings["THEME"] = str(theme_path)
+         else:
+             raise ValueError("Could not find the theme {}".format(settings["THEME"]))
+ 
+     # Clear CSS_FILE if the file doesn't exist in the theme
+     css_file = settings.get("CSS_FILE")
+     if css_file:
+-        theme = settings["THEME"]
++        theme = Path(settings["THEME"])
+         static_paths = settings.get("THEME_STATIC_PATHS", ["static"])
+         if not any(
+-            os.path.isfile(os.path.join(theme, sp, "css", css_file))
+-            for sp in static_paths
++            (theme / sp / "css" / css_file).is_file() for sp in static_paths
+         ):
+             settings["CSS_FILE"] = ""
+ 
+diff --git a/pelican/tools/pelican_import.py b/pelican/tools/pelican_import.py
+index 1c03f9c..8592bc5 100755
+--- a/pelican/tools/pelican_import.py
++++ b/pelican/tools/pelican_import.py
+@@ -5,6 +5,7 @@ import datetime
+ import json
+ import logging
+ import os
++import posixpath
+ import re
+ import subprocess
+ import sys
+@@ -13,6 +14,7 @@ import time
+ import urllib.request as urllib_request
+ from collections import defaultdict
+ from html import unescape
++from pathlib import Path
+ from urllib.error import URLError
+ from urllib.parse import quote, urlparse, urlsplit, urlunsplit
+ from urllib.request import urlretrieve
+@@ -238,7 +240,8 @@ def blogger2fields(xml):
+         try:
+             assert kind != "comment"
+             filename = entry.find("link", {"rel": "alternate"})["href"]
+-            filename = os.path.splitext(os.path.basename(filename))[0]
++            # URL (not filesystem path), hence posixpath for suffix/basename.
++            filename = posixpath.splitext(posixpath.basename(filename))[0]
+         except (AssertionError, TypeError, KeyError):
+             filename = entry.find("id").string.split(".")[-1]
+ 
+@@ -648,11 +651,10 @@ def mediumpost2fields(filepath: str) -> tuple:
+     )
+ 
+ 
+-def medium_slug(filepath: str) -> str:
++def medium_slug(filepath: str | os.PathLike) -> str:
+     """Make the filepath of a medium exported file into a slug."""
+     # slug: filename without extension
+-    slug = os.path.basename(filepath)
+-    slug = os.path.splitext(slug)[0]
++    slug = Path(filepath).stem
+     # A medium export filename looks like date_-title-...html
+     # But, RST doesn't like "_-" (see https://github.com/sphinx-doc/sphinx/issues/4350)
+     # so get rid of it
+@@ -664,11 +666,10 @@ def medium_slug(filepath: str) -> str:
+     return slug
+ 
+ 
+-def mediumposts2fields(medium_export_dir: str):
++def mediumposts2fields(medium_export_dir: str | os.PathLike):
+     """Take HTML posts in a medium export directory, and yield Pelican fields."""
+-    for file in os.listdir(medium_export_dir):
+-        filename = os.fsdecode(file)
+-        yield mediumpost2fields(os.path.join(medium_export_dir, filename))
++    for file in Path(medium_export_dir).iterdir():
++        yield mediumpost2fields(file)
+ 
+ 
+ def feed2fields(file):
+@@ -794,7 +795,7 @@ def get_out_filename(
+     wp_custpost,
+     slug_subs,
+ ):
+-    filename = os.path.basename(filename)
++    filename = Path(filename).name
+ 
+     # Enforce filename restrictions for various filesystems at once; see
+     # https://en.wikipedia.org/wiki/Filename#Reserved_characters_and_words
+@@ -805,13 +806,14 @@ def get_out_filename(
+         filename = "_"
+     filename = filename[:249]  # allow for 5 extra characters
+ 
+-    out_filename = os.path.join(output_path, filename + ext)
++    output_path = Path(output_path)
++    out_filename = output_path / (filename + ext)
+     # option to put page posts in pages/ subdirectory
+     if dirpage and kind == "page":
+-        pages_dir = os.path.join(output_path, "pages")
+-        if not os.path.isdir(pages_dir):
+-            os.mkdir(pages_dir)
+-        out_filename = os.path.join(pages_dir, filename + ext)
++        pages_dir = output_path / "pages"
++        if not pages_dir.is_dir():
++            pages_dir.mkdir()
++        out_filename = pages_dir / (filename + ext)
+     elif not dirpage and kind == "page":
+         pass
+     # option to put wp custom post types in directories with post type
+@@ -827,17 +829,19 @@ def get_out_filename(
+             catname = slugify(categories[0], regex_subs=slug_subs, preserve_case=True)
+         else:
+             catname = ""
+-        out_filename = os.path.join(output_path, typename, catname, filename + ext)
+-        if not os.path.isdir(os.path.join(output_path, typename, catname)):
+-            os.makedirs(os.path.join(output_path, typename, catname))
++        target_dir = output_path / typename / catname
++        out_filename = target_dir / (filename + ext)
++        if not target_dir.is_dir():
++            target_dir.mkdir(parents=True)
+     # option to put files in directories with categories names
+     elif dircat and (len(categories) > 0):
+         catname = slugify(categories[0], regex_subs=slug_subs, preserve_case=True)
+-        out_filename = os.path.join(output_path, catname, filename + ext)
+-        if not os.path.isdir(os.path.join(output_path, catname)):
+-            os.mkdir(os.path.join(output_path, catname))
++        target_dir = output_path / catname
++        out_filename = target_dir / (filename + ext)
++        if not target_dir.is_dir():
++            target_dir.mkdir()
+ 
+-    return out_filename
++    return str(out_filename)
+ 
+ 
+ def get_attachments(xml):
+@@ -877,18 +881,19 @@ def download_attachments(output_path, urls):
+     """Downloads WordPress attachments and returns a list of paths to
+     attachments that can be associated with a post (relative path to output
+     directory). Files that fail to download, will not be added to posts"""
++    output_path = Path(output_path)
+     locations = {}
+     for url in urls:
+         path = urlparse(url).path
+         # teardown path and rebuild to negate any errors with
+-        # os.path.join and leading /'s
+-        path = path.split("/")
+-        filename = path.pop(-1)
+-        localpath = ""
+-        for item in path:
++        # path joining and leading /'s
++        parts = path.split("/")
++        filename = parts.pop(-1)
++        localpath = Path()
++        for item in parts:
+             if sys.platform != "win32" or ":" not in item:
+-                localpath = os.path.join(localpath, item)
+-        full_path = os.path.join(output_path, localpath)
++                localpath = localpath / item
++        full_path = output_path / localpath
+ 
+         # Generate percent-encoded URL
+         scheme, netloc, path, query, fragment = urlsplit(url)
+@@ -896,12 +901,12 @@ def download_attachments(output_path, urls):
+             path = quote(path)
+             url = urlunsplit((scheme, netloc, path, query, fragment))
+ 
+-        if not os.path.exists(full_path):
+-            os.makedirs(full_path)
++        if not full_path.exists():
++            full_path.mkdir(parents=True)
+         print(f"downloading {filename}")
+         try:
+-            urlretrieve(url, os.path.join(full_path, filename))
+-            locations[url] = os.path.join(localpath, filename)
++            urlretrieve(url, full_path / filename)
++            locations[url] = str(localpath / filename)
+         except (URLError, OSError) as e:
+             # Python 2.7 throws an IOError rather Than URLError
+             logger.warning("No file could be downloaded from %s\n%s", url, e)
+@@ -969,7 +974,7 @@ def fields2pelican(
+             posts_require_pandoc.append(filename)
+ 
+         slug = (not disable_slugs and filename) or None
+-        assert slug is None or filename == os.path.basename(filename), (
++        assert slug is None or filename == Path(filename).name, (
+             f"filename is not a basename: {filename}"
+         )
+ 
+@@ -1026,7 +1031,7 @@ def fields2pelican(
+ 
+         if in_markup in ("html", "wp-html"):
+             with tempfile.TemporaryDirectory() as tmpdir:
+-                html_filename = os.path.join(tmpdir, "pandoc-input.html")
++                html_filename = str(Path(tmpdir) / "pandoc-input.html")
+                 # Replace newlines with paragraphs wrapped with <p> so
+                 # HTML is valid before conversion
+                 if in_markup == "wp-html":
+@@ -1221,9 +1226,10 @@ def main():
+         )
+         sys.exit(error)
+ 
+-    if not os.path.exists(args.output):
++    output = Path(args.output)
++    if not output.exists():
+         try:
+-            os.mkdir(args.output)
++            output.mkdir()
+         except OSError:
+             error = "Unable to create the output folder: " + args.output
+             sys.exit(error)
+diff --git a/pelican/tools/pelican_quickstart.py b/pelican/tools/pelican_quickstart.py
+index 7765716..ce3a08d 100755
+--- a/pelican/tools/pelican_quickstart.py
++++ b/pelican/tools/pelican_quickstart.py
+@@ -4,6 +4,7 @@ import argparse
+ import locale
+ import os
+ from collections.abc import Mapping
++from pathlib import Path
+ 
+ from jinja2 import Environment, FileSystemLoader
+ 
+@@ -40,7 +41,7 @@ if _DEFAULT_LANGUAGE is None:
+ else:
+     _DEFAULT_LANGUAGE = _DEFAULT_LANGUAGE.split("_")[0]
+ 
+-_TEMPLATES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
++_TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
+ _jinja_env = Environment(
+     loader=FileSystemLoader(_TEMPLATES_DIR),
+     trim_blocks=True,
+@@ -174,9 +175,7 @@ def ask_timezone(question, default, tzurl):
+ 
+ def render_jinja_template(tmpl_name: str, tmpl_vars: Mapping, target_path: str):
+     try:
+-        with open(
+-            os.path.join(CONF["basedir"], target_path), "w", encoding="utf-8"
+-        ) as fd:
++        with (Path(CONF["basedir"]) / target_path).open("w", encoding="utf-8") as fd:
+             _template = _jinja_env.get_template(tmpl_name)
+             fd.write(_template.render(**tmpl_vars))
+     except OSError as e:
+@@ -214,24 +213,21 @@ needed by Pelican.
+     """
+     )
+ 
+-    project = os.path.join(os.environ.get("VIRTUAL_ENV", os.curdir), ".project")
++    project = Path(os.environ.get("VIRTUAL_ENV", os.curdir)) / ".project"
+     no_path_was_specified = hasattr(args.path, "is_default_path")
+-    if os.path.isfile(project) and no_path_was_specified:
+-        CONF["basedir"] = open(project).read().rstrip("\n")
++    if project.is_file() and no_path_was_specified:
++        CONF["basedir"] = project.read_text().rstrip("\n")
+         print(
+             "Using project associated with current virtual environment. "
+             "Will save to:\n{}\n".format(CONF["basedir"])
+         )
+     else:
+-        CONF["basedir"] = os.path.abspath(
+-            os.path.expanduser(
+-                ask(
+-                    "Where do you want to create your new web site?",
+-                    answer=str,
+-                    default=args.path,
+-                )
+-            )
++        answer = ask(
++            "Where do you want to create your new web site?",
++            answer=str,
++            default=args.path,
+         )
++        CONF["basedir"] = str(Path(answer).expanduser().absolute())
+ 
+     CONF["sitename"] = ask(
+         "What will be the title of this web site?", answer=str, default=args.title
+@@ -373,13 +369,14 @@ needed by Pelican.
+             else:
+                 CONF["github_pages_branch"] = _GITHUB_PAGES_BRANCHES["project"]
+ 
++    basedir = Path(CONF["basedir"])
+     try:
+-        os.makedirs(os.path.join(CONF["basedir"], "content"))
++        (basedir / "content").mkdir(parents=True)
+     except OSError as e:
+         print(f"Error: {e}")
+ 
+     try:
+-        os.makedirs(os.path.join(CONF["basedir"], "output"))
++        (basedir / "output").mkdir(parents=True)
+     except OSError as e:
+         print(f"Error: {e}")
+ 
+diff --git a/pelican/tools/pelican_themes.py b/pelican/tools/pelican_themes.py
+index 29fd7a3..95d80f3 100755
+--- a/pelican/tools/pelican_themes.py
++++ b/pelican/tools/pelican_themes.py
+@@ -4,6 +4,7 @@ import argparse
+ import os
+ import shutil
+ import sys
++from pathlib import Path
+ 
+ 
+ def err(msg, die=None):
+@@ -22,9 +23,7 @@ except ImportError:
+     )
+ 
+ 
+-_THEMES_PATH = os.path.join(
+-    os.path.dirname(os.path.abspath(pelican.__file__)), "themes"
+-)
++_THEMES_PATH = Path(pelican.__file__).resolve().parent / "themes"
+ 
+ __version__ = "0.2"
+ _BUILTIN_THEMES = ["simple", "notmyidea"]
+@@ -155,35 +154,32 @@ def main():
+ 
+ def themes():
+     """Returns the list of the themes"""
+-    for i in os.listdir(_THEMES_PATH):
+-        e = os.path.join(_THEMES_PATH, i)
+-
+-        if os.path.isdir(e):
+-            if os.path.islink(e):
+-                yield (e, os.readlink(e))
++    for entry in _THEMES_PATH.iterdir():
++        if entry.is_dir():
++            if entry.is_symlink():
++                yield (entry, os.readlink(entry))
+             else:
+-                yield (e, None)
++                yield (entry, None)
+ 
+ 
+ def list_themes(v=False):
+     """Display the list of the themes"""
+     for theme_path, link_target in themes():
+-        if not v:
+-            theme_path = os.path.basename(theme_path)
++        theme_label = str(theme_path) if v else theme_path.name
+         if link_target:
+             if v:
+-                print(theme_path + (" (symbolic link to `" + link_target + "')"))
++                print(theme_label + (" (symbolic link to `" + link_target + "')"))
+             else:
+-                print(theme_path + "@")
++                print(theme_label + "@")
+         else:
+-            print(theme_path)
++            print(theme_label)
+ 
+ 
+ def remove(theme_name, v=False):
+     """Removes a theme"""
+ 
+     theme_name = theme_name.replace("/", "")
+-    target = os.path.join(_THEMES_PATH, theme_name)
++    target = _THEMES_PATH / theme_name
+ 
+     if theme_name in _BUILTIN_THEMES:
+         err(
+@@ -191,30 +187,31 @@ def remove(theme_name, v=False):
+             "You cannot remove a builtin theme with this script, "
+             "remove it by hand if you want."
+         )
+-    elif os.path.islink(target):
++    elif target.is_symlink():
+         if v:
+-            print("Removing link `" + target + "'")
+-        os.remove(target)
+-    elif os.path.isdir(target):
++            print("Removing link `" + str(target) + "'")
++        target.unlink()
++    elif target.is_dir():
+         if v:
+-            print("Removing directory `" + target + "'")
++            print("Removing directory `" + str(target) + "'")
+         shutil.rmtree(target)
+-    elif os.path.exists(target):
+-        err(target + " : not a valid theme")
++    elif target.exists():
++        err(str(target) + " : not a valid theme")
+     else:
+-        err(target + " : no such file or directory")
++        err(str(target) + " : no such file or directory")
+ 
+ 
+ def install(path, v=False, u=False):
+     """Installs a theme"""
+-    if not os.path.exists(path):
++    source = Path(path)
++    if not source.exists():
+         err(path + " : no such file or directory")
+-    elif not os.path.isdir(path):
++    elif not source.is_dir():
+         err(path + " : not a directory")
+     else:
+-        theme_name = os.path.basename(os.path.normpath(path))
+-        theme_path = os.path.join(_THEMES_PATH, theme_name)
+-        exists = os.path.exists(theme_path)
++        theme_name = source.name
++        theme_path = _THEMES_PATH / theme_name
++        exists = theme_path.exists()
+         if exists and not u:
+             err(path + " : already exists")
+         elif exists:
+@@ -224,17 +221,16 @@ def install(path, v=False, u=False):
+             if v:
+                 print(f"Copying '{path}' to '{theme_path}' ...")
+             try:
+-                shutil.copytree(path, theme_path)
++                shutil.copytree(source, theme_path)
+ 
+                 try:
+                     if os.name == "posix":
+                         for root, dirs, files in os.walk(theme_path):
++                            root_path = Path(root)
+                             for d in dirs:
+-                                dname = os.path.join(root, d)
+-                                os.chmod(dname, 493)  # 0o755
++                                (root_path / d).chmod(0o755)
+                             for f in files:
+-                                fname = os.path.join(root, f)
+-                                os.chmod(fname, 420)  # 0o644
++                                (root_path / f).chmod(0o644)
+                 except OSError as e:
+                     err(
+                         "Cannot change permissions of files "
+@@ -247,43 +243,40 @@ def install(path, v=False, u=False):
+ 
+ def symlink(path, v=False):
+     """Symbolically link a theme"""
+-    path = os.path.realpath(path)
+-    if not os.path.exists(path):
+-        err(path + " : no such file or directory")
+-    elif not os.path.isdir(path):
+-        err(path + " : not a directory")
++    source = Path(path).resolve()
++    if not source.exists():
++        err(str(source) + " : no such file or directory")
++    elif not source.is_dir():
++        err(str(source) + " : not a directory")
+     else:
+-        theme_name = os.path.basename(os.path.normpath(path))
+-        theme_path = os.path.join(_THEMES_PATH, theme_name)
+-        if os.path.exists(theme_path):
+-            err(path + " : already exists")
++        theme_path = _THEMES_PATH / source.name
++        if theme_path.exists():
++            err(str(source) + " : already exists")
+         else:
+             if v:
+-                print(f"Linking `{path}' to `{theme_path}' ...")
++                print(f"Linking `{source}' to `{theme_path}' ...")
+             try:
+-                os.symlink(path, theme_path)
++                theme_path.symlink_to(source)
+             except OSError as e:
+-                err(f"Cannot link `{path}' to `{theme_path}':\n{e!s}")
++                err(f"Cannot link `{source}' to `{theme_path}':\n{e!s}")
+ 
+ 
+ def is_broken_link(path):
+     """Returns True if the path given as is a broken symlink"""
+-    path = os.path.realpath(path)
+-    return not os.path.exists(path)
++    return not Path(path).resolve().exists()
+ 
+ 
+ def clean(v=False):
+     """Removes the broken symbolic links"""
+     c = 0
+-    for path in os.listdir(_THEMES_PATH):
+-        path = os.path.join(_THEMES_PATH, path)
+-        if os.path.islink(path) and is_broken_link(path):
++    for entry in _THEMES_PATH.iterdir():
++        if entry.is_symlink() and is_broken_link(entry):
+             if v:
+-                print(f"Removing {path}")
++                print(f"Removing {entry}")
+             try:
+-                os.remove(path)
++                entry.unlink()
+             except OSError:
+-                print(f"Error: cannot remove {path}")
++                print(f"Error: cannot remove {entry}")
+             else:
+                 c += 1
+ 
+diff --git a/pelican/tools/templates/tasks.py.jinja2 b/pelican/tools/templates/tasks.py.jinja2
+index 26af6f0..bd082e0 100644
+--- a/pelican/tools/templates/tasks.py.jinja2
++++ b/pelican/tools/templates/tasks.py.jinja2
+@@ -1,7 +1,7 @@
+-import os
+ import shlex
+ import shutil
+ import sys
++from pathlib import Path
+ {% if github %}
+ import datetime
+ {% endif %}
+@@ -54,9 +54,10 @@ CONFIG = {
+ @task
+ def clean(c):
+     """Remove generated files"""
+-    if os.path.isdir(CONFIG["deploy_path"]):
+-        shutil.rmtree(CONFIG["deploy_path"])
+-        os.makedirs(CONFIG["deploy_path"])
++    deploy_path = Path(CONFIG["deploy_path"])
++    if deploy_path.is_dir():
++        shutil.rmtree(deploy_path)
++        deploy_path.mkdir(parents=True)
+ 
+ 
+ @task
+diff --git a/pelican/urlwrappers.py b/pelican/urlwrappers.py
+index 6eb952d..0ce9367 100644
+--- a/pelican/urlwrappers.py
++++ b/pelican/urlwrappers.py
+@@ -1,7 +1,7 @@
+ import functools
+ import logging
+-import os
+ import pathlib
++import posixpath
+ 
+ from pelican.utils import slugify
+ 
+@@ -123,7 +123,8 @@ class URLWrapper:
+             logger.warning("%s is set to %s", setting, value)
+             return value
+         elif get_page_name:
+-            return os.path.splitext(value)[0].format(**self.as_dict())
++            # URL template (not a filesystem path); use posixpath.
++            return posixpath.splitext(value)[0].format(**self.as_dict())
+         else:
+             return value.format(**self.as_dict())
+ 
+diff --git a/pelican/utils.py b/pelican/utils.py
+index 90d1a3f..1f21bcb 100644
+--- a/pelican/utils.py
++++ b/pelican/utils.py
+@@ -19,6 +19,7 @@ from collections.abc import (
+     Iterable,
+     Sequence,
+ )
++from pathlib import Path
+ from contextlib import contextmanager
+ from functools import partial
+ from html import entities
+@@ -49,12 +50,16 @@ logger = logging.getLogger(__name__)
+ 
+ 
+ def sanitised_join(base_directory: str, *parts: str) -> str:
+-    joined = posixize_path(os.path.abspath(os.path.join(base_directory, *parts)))
+-    base = posixize_path(os.path.abspath(base_directory))
+-    if not joined.startswith(base):
+-        raise RuntimeError(f"Attempted to break out of output directory to {joined}")
++    base = Path(base_directory).resolve()
++    joined = base.joinpath(*parts).resolve()
++    try:
++        joined.relative_to(base)
++    except ValueError:
++        raise RuntimeError(
++            f"Attempted to break out of output directory to {joined.as_posix()}"
++        ) from None
+ 
+-    return joined
++    return joined.as_posix()
+ 
+ 
+ def strftime(date: datetime.datetime, date_format: str) -> str:
+@@ -240,11 +245,11 @@ def get_date(string: str) -> datetime.datetime:
+ 
+ 
+ @contextmanager
+-def pelican_open(filename: str, mode: str = "r") -> Generator[str]:
++def pelican_open(filename: str | os.PathLike, mode: str = "r") -> Generator[str]:
+     """Open a file and return its content"""
+ 
+     # utf-8-sig will clear any BOM if present
+-    with open(filename, mode, encoding="utf-8-sig") as infile:
++    with Path(filename).open(mode, encoding="utf-8-sig") as infile:
+         content = infile.read()
+     yield content
+ 
+@@ -292,7 +297,11 @@ def slugify(
+     return value.strip()
+ 
+ 
+-def copy(source: str, destination: str, ignores: Iterable[str] | None = None) -> None:
++def copy(
++    source: str | os.PathLike,
++    destination: str | os.PathLike,
++    ignores: Iterable[str] | None = None,
++) -> None:
+     """Recursively copy source into destination.
+ 
+     If source is a file, destination has to be a file as well.
+@@ -304,39 +313,37 @@ def copy(source: str, destination: str, ignores: Iterable[str] | None = None) ->
+         files matching those patterns will _not_ be copied.
+     """
+ 
+-    def walk_error(err):
+-        logger.warning("While copying %s: %s: %s", source_, err.filename, err.strerror)
+-
+-    source_ = os.path.abspath(os.path.expanduser(source))
+-    destination_ = os.path.abspath(os.path.expanduser(destination))
++    source_ = Path(source).expanduser().absolute()
++    destination_ = Path(destination).expanduser().absolute()
+ 
+     if ignores is None:
+         ignores = []
+ 
+-    if any(fnmatch.fnmatch(os.path.basename(source), ignore) for ignore in ignores):
++    if any(fnmatch.fnmatch(Path(source).name, ignore) for ignore in ignores):
+         logger.info("Not copying %s due to ignores", source_)
+         return
+ 
+-    if os.path.isfile(source_):
+-        dst_dir = os.path.dirname(destination_)
+-        if not os.path.exists(dst_dir):
++    if source_.is_file():
++        dst_dir = destination_.parent
++        if not dst_dir.exists():
+             logger.info("Creating directory %s", dst_dir)
+-            os.makedirs(dst_dir)
++            dst_dir.mkdir(parents=True)
+         logger.info("Copying %s to %s", source_, destination_)
+         copy_file(source_, destination_)
+ 
+-    elif os.path.isdir(source_):
+-        if not os.path.exists(destination_):
++    elif source_.is_dir():
++        if not destination_.exists():
+             logger.info("Creating directory %s", destination_)
+-            os.makedirs(destination_)
+-        if not os.path.isdir(destination_):
++            destination_.mkdir(parents=True)
++        if not destination_.is_dir():
+             logger.warning(
+                 "Cannot copy %s (a directory) to %s (a file)", source_, destination_
+             )
+             return
+ 
+-        for src_dir, subdirs, others in os.walk(source_, followlinks=True):
+-            dst_dir = os.path.join(destination_, os.path.relpath(src_dir, source_))
++        for src_dir_str, subdirs, others in os.walk(source_, followlinks=True):
++            src_dir = Path(src_dir_str)
++            dst_dir = destination_ / src_dir.relative_to(source_)
+ 
+             subdirs[:] = (
+                 s for s in subdirs if not any(fnmatch.fnmatch(s, i) for i in ignores)
+@@ -345,15 +352,15 @@ def copy(source: str, destination: str, ignores: Iterable[str] | None = None) ->
+                 o for o in others if not any(fnmatch.fnmatch(o, i) for i in ignores)
+             )
+ 
+-            if not os.path.isdir(dst_dir):
++            if not dst_dir.is_dir():
+                 logger.info("Creating directory %s", dst_dir)
+                 # Parent directories are known to exist, so 'mkdir' suffices.
+-                os.mkdir(dst_dir)
++                dst_dir.mkdir()
+ 
+             for o in others:
+-                src_path = os.path.join(src_dir, o)
+-                dst_path = os.path.join(dst_dir, o)
+-                if os.path.isfile(src_path):
++                src_path = src_dir / o
++                dst_path = dst_dir / o
++                if src_path.is_file():
+                     logger.info("Copying %s to %s", src_path, dst_path)
+                     copy_file(src_path, dst_path)
+                 else:
+@@ -364,7 +371,7 @@ def copy(source: str, destination: str, ignores: Iterable[str] | None = None) ->
+                     )
+ 
+ 
+-def copy_file(source: str, destination: str) -> None:
++def copy_file(source: str | os.PathLike, destination: str | os.PathLike) -> None:
+     """Copy a file"""
+     try:
+         shutil.copyfile(source, destination)
+@@ -374,65 +381,68 @@ def copy_file(source: str, destination: str) -> None:
+         )
+ 
+ 
+-def clean_output_dir(path: str, retention: Iterable[str]) -> None:
++def clean_output_dir(path: str | os.PathLike, retention: Iterable[str]) -> None:
+     """Remove all files from output directory except those in retention list"""
+ 
+-    if not os.path.exists(path):
++    path = Path(path)
++    if not path.exists():
+         logger.debug("Directory already removed: %s", path)
+         return
+ 
+-    if not os.path.isdir(path):
++    if not path.is_dir():
+         try:
+-            os.remove(path)
++            path.unlink()
+         except OSError:
+             logger.exception("Unable to delete file %s", path)
+         return
+ 
+     # remove existing content from output folder unless in retention list
+-    for filename in os.listdir(path):
+-        file = os.path.join(path, filename)
++    for child in path.iterdir():
++        filename = child.name
+         if any(filename == retain for retain in retention):
+             logger.debug(
+-                "Skipping deletion; %s is on retention list: %s", filename, file
++                "Skipping deletion; %s is on retention list: %s", filename, child
+             )
+-        elif os.path.isdir(file):
++        elif child.is_dir():
+             try:
+-                shutil.rmtree(file)
+-                logger.debug("Deleted directory %s", file)
++                shutil.rmtree(child)
++                logger.debug("Deleted directory %s", child)
+             except OSError:
+-                logger.exception("Unable to delete directory %s", file)
+-        elif os.path.isfile(file) or os.path.islink(file):
++                logger.exception("Unable to delete directory %s", child)
++        elif child.is_file() or child.is_symlink():
+             try:
+-                os.remove(file)
+-                logger.debug("Deleted file/link %s", file)
++                child.unlink()
++                logger.debug("Deleted file/link %s", child)
+             except OSError:
+-                logger.exception("Unable to delete file %s", file)
++                logger.exception("Unable to delete file %s", child)
+         else:
+-            logger.error("Unable to delete %s, file type unknown", file)
++            logger.error("Unable to delete %s, file type unknown", child)
+ 
+ 
+-def get_relative_path(path: str) -> str:
++def get_relative_path(path: str | os.PathLike) -> str:
+     """Return the relative path from the given path to the root path."""
+     components = split_all(path)
+     if components is None or len(components) <= 1:
+         return os.curdir
+     else:
+         parents = [os.pardir] * (len(components) - 1)
+-        return os.path.join(*parents)
++        return str(Path(*parents))
+ 
+ 
+-def path_to_url(path: str) -> str:
++def path_to_url(path: str | os.PathLike | None) -> str | None:
+     """Return the URL corresponding to a given path."""
+     if path is not None:
+         path = posixize_path(path)
+     return path
+ 
+ 
+-def posixize_path(rel_path: str) -> str:
++def posixize_path(rel_path: str | os.PathLike) -> str:
+     """Use '/' as path separator, so that source references,
+     like '{static}/foo/bar.jpg' or 'extras/favicon.ico',
+     will work on Windows as well as on Mac and Linux."""
+-    return rel_path.replace(os.sep, "/")
++    if isinstance(rel_path, pathlib.PurePath):
++        return rel_path.as_posix()
++    return str(rel_path).replace(os.sep, "/")
+ 
+ 
+ class _HTMLWordTruncator(HTMLParser):
+@@ -811,7 +821,7 @@ def order_content(
+ 
+             if order_by == "basename":
+                 content_list.sort(
+-                    key=lambda x: os.path.basename(x.source_path or ""),
++                    key=lambda x: Path(x.source_path or "").name,
+                     reverse=order_reversed,
+                 )
+             else:
+@@ -855,8 +865,9 @@ class FileChangeFilter(watchfiles.DefaultFilter):
+         filters of `watchfiles.DefaultFilter`, seen here:
+         https://watchfiles.helpmanual.io/api/filters/#watchfiles.DefaultFilter.ignore_dirs
+         """
++        abspath = str(Path(path).absolute())
+         return super().__call__(change, path) and not any(
+-            fnmatch.fnmatch(os.path.abspath(path), p) for p in self.ignore_file_patterns
++            fnmatch.fnmatch(abspath, p) for p in self.ignore_file_patterns
+         )
+ 
+ 
+@@ -874,19 +885,20 @@ def wait_for_changes(
+         content_path,
+     ]
+ 
+-    candidate_paths.extend(
+-        os.path.join(content_path, path) for path in settings.get("STATIC_PATHS", [])
+-    )
++    if content_path:
++        candidate_paths.extend(
++            Path(content_path) / path for path in settings.get("STATIC_PATHS", [])
++        )
+ 
+     watching_paths = []
+     for path in candidate_paths:
+         if not path:
+             continue
+-        path = os.path.abspath(path)
+-        if not os.path.exists(path):
++        path = Path(path).absolute()
++        if not path.exists():
+             logger.warning("Unable to watch path '%s' as it does not exist.", path)
+         else:
+-            watching_paths.append(path)
++            watching_paths.append(str(path))
+ 
+     return next(
+         watchfiles.watch(
+@@ -910,44 +922,34 @@ def set_date_tzinfo(
+     return d
+ 
+ 
+-def mkdir_p(path: str) -> None:
+-    os.makedirs(path, exist_ok=True)
++def mkdir_p(path: str | os.PathLike) -> None:
++    Path(path).mkdir(parents=True, exist_ok=True)
+ 
+ 
+-def split_all(path: str | pathlib.Path | None) -> Sequence[str] | None:
+-    """Split a path into a list of components
++def split_all(path: str | os.PathLike | None) -> Sequence[str] | None:
++    """Split a path into a tuple of components.
+ 
+-    While os.path.split() splits a single component off the back of
+-    `path`, this function splits all components:
+-
+-    >>> split_all(os.path.join('a', 'b', 'c'))
+-    ['a', 'b', 'c']
++    >>> split_all(Path('a', 'b', 'c'))
++    ('a', 'b', 'c')
+     """
+-    if isinstance(path, str):
+-        components = []
+-        path = path.lstrip("/")
+-        while path:
+-            head, tail = os.path.split(path)
+-            if tail:
+-                components.insert(0, tail)
+-            elif head == path:
+-                components.insert(0, head)
+-                break
+-            path = head
+-        return components
+-    elif isinstance(path, pathlib.Path):
+-        return path.parts
+-    elif path is None:
++    if path is None:
+         return None
++    if isinstance(path, str):
++        # Preserve historical behavior: strip leading "/" so an absolute path's
++        # root is not treated as a component.
++        path = Path(path.lstrip("/"))
++    elif isinstance(path, pathlib.PurePath):
++        pass
+     else:
+         raise TypeError(
+             f'"path" was {type(path)}, must be string, None, or pathlib.Path'
+         )
++    return path.parts
+ 
+ 
+-def path_to_file_url(path: str) -> str:
++def path_to_file_url(path: str | os.PathLike) -> str:
+     """Convert file-system path to file:// URL"""
+-    return urllib.parse.urljoin("file://", urllib.request.pathname2url(path))
++    return urllib.parse.urljoin("file://", urllib.request.pathname2url(str(path)))
+ 
+ 
+ def maybe_pluralize(count: int, singular: str, plural: str) -> str:
+@@ -988,9 +990,9 @@ def temporary_locale(
+     locale.setlocale(lc_category, orig_locale)
+ 
+ 
+-def file_suffix(path: str) -> str:
++def file_suffix(path: str | os.PathLike) -> str:
+     """Return the suffix of a filename in a path."""
+-    _, ext = os.path.splitext(os.path.basename(path))
++    ext = Path(path).suffix
+     ret = ""
+     if len(ext) > 1:
+         # drop the ".", e.g., "exe", not ".exe"
+diff --git a/pelican/writers.py b/pelican/writers.py
+index 67d52ec..fe99a3c 100644
+--- a/pelican/writers.py
++++ b/pelican/writers.py
+@@ -1,5 +1,6 @@
+ import logging
+ import os
++from pathlib import Path
+ from posixpath import join as posix_join
+ from urllib.parse import urljoin
+ 
+@@ -128,7 +129,7 @@ class Writer:
+         if override:
+             self._overridden_files.add(filename)
+         self._written_files.add(filename)
+-        return open(filename, "w", encoding=encoding)
++        return Path(filename).open("w", encoding=encoding)
+ 
+     def write_feed(
+         self,
+@@ -171,7 +172,7 @@ class Writer:
+         if path:
+             complete_path = sanitised_join(self.output_path, path)
+ 
+-            os.makedirs(os.path.dirname(complete_path), exist_ok=True)
++            Path(complete_path).parent.mkdir(parents=True, exist_ok=True)
+ 
+             with self._open_w(complete_path, "utf-8", override_output) as fp:
+                 feed.write(fp, "utf-8")
+@@ -222,7 +223,7 @@ class Writer:
+             output = template.render(localcontext)
+             path = sanitised_join(output_path, name)
+ 
+-            os.makedirs(os.path.dirname(path), exist_ok=True)
++            Path(path).parent.mkdir(parents=True, exist_ok=True)
+ 
+             with self._open_w(path, "utf-8", override=override) as f:
+                 f.write(output)

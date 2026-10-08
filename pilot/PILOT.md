@@ -73,3 +73,65 @@ paths go through `pathlib`; `os.path`/string handling stays only for things
 that aren't filesystem paths (URLs, URL templates). Grade completeness on
 filesystem operations. Then a second quick pilot round (2 runs) to see whether
 the traps bite once they can't be sidestepped.
+
+# Pilot round 2: tightened prompt (2026-10-07)
+
+**Change.** `PROMPT.md` now says filesystem paths must use `pathlib`;
+`os.path`/string handling may stay only for values that aren't filesystem paths
+(URLs, URL templates), each marked with a comment. Round 1's prompt is kept as
+`PROMPT_v1.md`. Weaker models added, per review: one Opus 4.7 run and one
+Sonnet 5.5 run. Limits unchanged (120 min / $20). Four runs in parallel: each
+used ~150 MB, far below the Docker VM's 8.3 GB.
+
+| Run | Model | Time | Cost | Visible | Sites (EN/FR/hidden) | Plugin values | `os.path` left (commented) |
+|---|---|---|---|---|---|---|---|
+| r2d-s55 | Sonnet 5.5 | 10.0 min | $1.80 | 291 passed | 0 / 0 / 0 | str | 13 (10) |
+| r2c-o47 | Opus 4.7 | 20.6 min | $19.37 | 291 passed | 0 / 0 / 0 | str | 10 (9) |
+| r2b-o55 | Opus 5.5 | 32.0 min | $11.33 | 291 passed | 0 / 0 / 0 | str | 21 (11) |
+| r2a-o55 | Opus 5.5 | 14.2 min | n/a | 291 passed | 0 / 0 / 0 | str | 33 (23) |
+
+**r2a-o55 is invalid (harness flaw).** Cleaning up a stray autoreloading
+`pelican` server, the agent looped over `/proc` and killed every process whose
+command line contained "pelican". The runner passed the prompt as a
+command-line argument, and the prompt starts with "Pelican uses…", so the agent
+killed its own Claude Code process (PID 1). Fix: the prompt now goes in on
+stdin. Its code at the moment it died passed every check.
+
+The tightened prompt worked as intended on completeness: 10–33 `os.path` uses
+left instead of 128–138, so the risky sites were actually ported. It slowed
+Opus 5.5 down (32 min vs ~10). It still broke nothing.
+
+## Hidden-contract checks (`check/contracts/contracts.py`)
+
+Per review: the question isn't "bigger codebase?" but "where can behavior hide
+that reading the old code won't reveal?" Four scenarios, each run with original
+Pelican and the candidate, comparing output trees and exit codes:
+
+| Scenario | What it exercises |
+|---|---|
+| theme | a theme template doing string ops on path values (`source_path.endswith`, `save_as\|length`, `.upper()`, `output_file.startswith`, URL concatenation) |
+| incremental | content cache on: build, edit one article, rebuild |
+| old_cache | original Pelican writes the cache; the candidate rebuilds from it |
+| fs_edges | a broken symlink and an unreadable folder in the content directory |
+
+Controls: untouched Pelican matches in every scenario; a mutation that makes
+`source_path` a `Path` fails all four (the template raises
+`'PosixPath object' has no attribute 'endswith'`).
+
+**All six pilot solutions (rounds 1 and 2, including the invalid run) pass all
+four scenarios.**
+
+## Conclusion of the pilot
+
+This task, as built, doesn't produce failures in current models. Across six
+solutions from three models, every one preserved behavior on the sample sites,
+the hidden RELATIVE_URLS site, the plugin probe, and all four hidden-contract
+scenarios. It separates models on cost and time (Sonnet 5.5: $1.80 / 10 min;
+Opus 4.7: $19.37 / 21 min), not correctness.
+
+The likely reason: in a behavior-preserving migration the old code is both the
+specification and fully readable, and every run built its own old-vs-new
+differential check without being asked (11, 21, and more site
+configurations). Careful reading plus self-built differential testing covers a
+migration like this. A bigger codebase would add work, not difficulty, unless
+it brings behavior that isn't visible in the code being migrated.
