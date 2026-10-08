@@ -38,6 +38,7 @@ def main():
     ap.add_argument("--model", required=True)
     ap.add_argument("--timeout", type=float, default=120, help="minutes")
     ap.add_argument("--budget", type=float, default=20.0)
+    ap.add_argument("--prompt", default="PROMPT.md")
     args = ap.parse_args()
 
     token = open(TOKEN_FILE).read().strip()
@@ -56,7 +57,7 @@ def main():
     if sys.platform == "darwin" and shutil.which("caffeinate"):
         subprocess.Popen(["caffeinate", "-ims", "-w", str(os.getpid())])
 
-    prompt = open(os.path.join(HERE, "PROMPT.md")).read()
+    prompt = open(os.path.join(HERE, args.prompt)).read()
     container = "pelican-pilot-" + run_id
     cmd = [DOCKER, "run", "--rm", "--name", container, "--user", f"{os.getuid()}:{os.getgid()}",
            "--memory", "4g", "--cpus", "2", "-e", "CLAUDE_CODE_OAUTH_TOKEN",
@@ -97,7 +98,7 @@ def main():
             result = ev
     check = subprocess.run([sys.executable, os.path.join(HERE, "check", "check.py"), repo],
                            capture_output=True, text=True)
-    summary = {"run_id": run_id, "model": args.model, "status": status, "minutes": minutes,
+    summary = {"run_id": run_id, "model": args.model, "prompt": args.prompt, "status": status, "minutes": minutes,
                "cost_usd": result.get("total_cost_usd"), "agent_final_message": result.get("result"),
                "files_changed": diff.strip().splitlines()[-1] if diff.strip() else "none",
                "check": json.loads(check.stdout) if check.returncode == 0 else check.stderr[-2000:]}

@@ -10,9 +10,8 @@ Requirements:
   generate exactly the same output as it does today.
 - No changes to the public plugin or theme API.
 - Pelican supports Python 3.11 and later; the code must keep working on 3.11.
-- Filesystem paths must be handled with `pathlib`. `os.path` (or plain string
-  handling) may remain only for values that aren't filesystem paths, such as
-  URLs and URL templates; mark each one you keep with a short comment.
+- Where `os.path` or string handling is still the right tool, you may keep it;
+  leave a short comment saying why.
 - The existing test suite must still pass. It is not exhaustive.
 
 Run the tests with `python -m pytest pelican/tests -n 4`.
