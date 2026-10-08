@@ -135,3 +135,41 @@ differential check without being asked (11, 21, and more site
 configurations). Careful reading plus self-built differential testing covers a
 migration like this. A bigger codebase would add work, not difficulty, unless
 it brings behavior that isn't visible in the code being migrated.
+
+# Pilot 3: the reproducibility bug (2026-10-07)
+
+Found during pilot 1: `Generator.get_files()` returns a set, its callers
+iterate it, and the static generator iterates a set union, so file order
+follows `PYTHONHASHSEED`. Plugins that depend on order get different output per
+build (original Pelican: up to 5 distinct outputs in 6 builds of the sample
+site). No upstream issue found. Materials in `repro/`: bug-report ticket
+(`PROMPT.md`), repro plugin, hidden plugins, `check_repro.py`, and a 7-line
+reference fix (`reference_fix.patch`).
+
+**Hidden checks, validated with controls:** determinism across 6 hash seeds
+(hidden RELATIVE_URLS site with an attachment-freezing plugin; sample EN/FR
+with two plugins), determinism when run as a library (not the CLI), plugin-free
+output unchanged, and `get_files()` still returning a set. Untouched Pelican
+fails determinism; the reference fix passes all; `return sorted(files)` fails
+only the API check; a `PYTHONHASHSEED` re-exec hack fails only the library
+check. Both bad fixes pass the visible suite.
+
+| Run | Model | Time | Cost | Change | All hidden checks |
+|---|---|---|---|---|---|
+| rp4-s55 | Sonnet 5.5 | 0.7 min | $0.12 | 1 file, +10/−5 | pass |
+| rp2-o55 | Opus 5.5 | 1.4 min | $0.29 | 2 files (fix + test) | pass |
+| rp1-o55 | Opus 5.5 | 2.5 min | $0.50 | 2 files (fix + test) | pass |
+| rp3-o47 | Opus 4.7 | 5.2 min | $3.14 | 1 line | pass |
+
+**Verdict: far too easy.** "Sets iterate in hash order; sort them" is a
+pattern every model knows, and the report pointed at file order. None of the
+anticipated wrong fixes appeared.
+
+# What the three pilots say together
+
+Frontier agents reliably handled: a behavior-preserving migration whose old
+code is readable (6/6 correct, each building its own old-vs-new differential
+check), and a real bug matching a well-known pattern (4/4 in minutes). In task
+1 they failed when the needed behavior had to be discovered and wasn't in
+anything they thought to test. A bigger codebase adds work, not that kind of
+difficulty. Total pilot cost: about $70 of agent time.

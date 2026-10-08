@@ -1,0 +1,2 @@
+ pelican/generators.py | 15 ++++++++++-----
+ 1 file changed, 10 insertions(+), 5 deletions(-)

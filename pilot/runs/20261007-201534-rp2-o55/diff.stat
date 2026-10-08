@@ -1,0 +1,3 @@
+ pelican/generators.py            | 25 ++++++++++++++++++-------
+ pelican/tests/test_generators.py | 22 ++++++++++++++++++++++
+ 2 files changed, 40 insertions(+), 7 deletions(-)

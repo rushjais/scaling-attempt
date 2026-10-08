@@ -107,7 +107,9 @@ def main():
             result = ev
     check = subprocess.run([sys.executable, args.checker, repo],
                            capture_output=True, text=True)
-    summary = {"run_id": run_id, "model": args.model, "prompt": args.prompt, "status": status, "minutes": minutes,
+    project = os.path.dirname(HERE)
+    prompt_rel = os.path.relpath(os.path.abspath(os.path.join(HERE, args.prompt)), project)
+    summary = {"run_id": run_id, "model": args.model, "prompt": prompt_rel,  # relative: no home paths in logs "status": status, "minutes": minutes,
                "cost_usd": result.get("total_cost_usd"), "agent_final_message": result.get("result"),
                "files_changed": diff.strip().splitlines()[-1] if diff.strip() else "none",
                "check": json.loads(check.stdout) if check.returncode == 0 else check.stderr[-2000:]}

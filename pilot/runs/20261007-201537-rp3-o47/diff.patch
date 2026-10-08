@@ -1,0 +1,13 @@
+diff --git a/pelican/generators.py b/pelican/generators.py
+index 515257c..d05d10e 100644
+--- a/pelican/generators.py
++++ b/pelican/generators.py
+@@ -1035,7 +1035,7 @@ class StaticGenerator(Generator):
+             exclude=self.settings["STATIC_EXCLUDES"],
+             extensions=False,
+         )
+-        for f in linked_files | found_files:
++        for f in sorted(linked_files | found_files):
+             # skip content source files unless the user explicitly wants them
+             if self.settings["STATIC_EXCLUDE_SOURCES"]:
+                 if self._is_potential_source_path(f):

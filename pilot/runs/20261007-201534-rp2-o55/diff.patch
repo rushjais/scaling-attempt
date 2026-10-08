@@ -1,0 +1,90 @@
+diff --git a/pelican/generators.py b/pelican/generators.py
+index 515257c..6fbd4f8 100644
+--- a/pelican/generators.py
++++ b/pelican/generators.py
+@@ -255,8 +255,10 @@ class Generator:
+ 
+     def _check_disabled_readers(self, paths, exclude: list[str] | None) -> None:
+         """Log warnings for files that would have been processed by disabled readers."""
+-        for fil in self.get_files(
+-            paths, exclude=exclude, extensions=self.readers.disabled_extensions
++        for fil in sorted(
++            self.get_files(
++                paths, exclude=exclude, extensions=self.readers.disabled_extensions
++            )
+         ):
+             self.readers.check_file(fil)
+ 
+@@ -701,8 +703,13 @@ class ArticlesGenerator(CachingGenerator):
+         all_articles = []
+         all_drafts = []
+         hidden_articles = []
+-        for f in self.get_files(
+-            self.settings["ARTICLE_PATHS"], exclude=self.settings["ARTICLE_EXCLUDES"]
++        # get_files() returns a set, whose iteration order varies between
++        # runs; sort it so that the output is reproducible
++        for f in sorted(
++            self.get_files(
++                self.settings["ARTICLE_PATHS"],
++                exclude=self.settings["ARTICLE_EXCLUDES"],
++            )
+         ):
+             article = self.get_cached_data(f, None)
+             if article is None:
+@@ -916,8 +923,11 @@ class PagesGenerator(CachingGenerator):
+         all_pages = []
+         hidden_pages = []
+         draft_pages = []
+-        for f in self.get_files(
+-            self.settings["PAGE_PATHS"], exclude=self.settings["PAGE_EXCLUDES"]
++        # sort for reproducible output (see ArticlesGenerator)
++        for f in sorted(
++            self.get_files(
++                self.settings["PAGE_PATHS"], exclude=self.settings["PAGE_EXCLUDES"]
++            )
+         ):
+             page = self.get_cached_data(f, None)
+             if page is None:
+@@ -1035,7 +1045,8 @@ class StaticGenerator(Generator):
+             exclude=self.settings["STATIC_EXCLUDES"],
+             extensions=False,
+         )
+-        for f in linked_files | found_files:
++        # sort for reproducible output (see ArticlesGenerator)
++        for f in sorted(linked_files | found_files):
+             # skip content source files unless the user explicitly wants them
+             if self.settings["STATIC_EXCLUDE_SOURCES"]:
+                 if self._is_potential_source_path(f):
+diff --git a/pelican/tests/test_generators.py b/pelican/tests/test_generators.py
+index f566bc9..2e5cc69 100644
+--- a/pelican/tests/test_generators.py
++++ b/pelican/tests/test_generators.py
+@@ -1314,6 +1314,28 @@ class TestStaticGenerator(unittest.TestCase):
+             "StaticGenerator skipped a file that it should have included",
+         )
+ 
++    def test_staticfiles_order_is_reproducible(self):
++        """Test that staticfiles are in a stable (sorted) order, rather than
++        the hash-dependent order of a set."""
++        names = [f"file{i:02d}.txt" for i in range(30)]
++        for name in names:
++            with open(os.path.join(self.temp_content, "static", name), "w") as f:
++                f.write("x")
++        context = get_context(self.settings)
++        context["static_links"] = {"static/file05.txt"}
++        StaticGenerator(
++            context=context,
++            settings=self.settings,
++            path=self.temp_content,
++            theme="",
++            output_path=self.temp_output,
++        ).generate_context()
++
++        self.assertEqual(
++            [os.path.basename(sf.source_path) for sf in context["staticfiles"]],
++            names,
++        )
++
+     def test_static_exclude_sources(self):
+         """Test that StaticGenerator respects STATIC_EXCLUDE_SOURCES."""
+ 

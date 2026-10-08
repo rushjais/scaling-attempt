@@ -1,0 +1,43 @@
+{
+  "run_id": "20261007-201531-rp1-o55",
+  "model": "claude-opus-5-5",
+  "prompt": "../repro/PROMPT.md",
+  "status": "exit 0",
+  "minutes": 2.5,
+  "cost_usd": 0.5023498,
+  "agent_final_message": "I fixed it: building the same content with the same settings and plugins now gives identical output every time.\n\n**Cause:** `Generator.get_files()` returns a `set` of file paths, and the generators looped over that set directly. Python changes the hash of strings on every run, so the order of a set of paths changes too. That meant `generator.staticfiles` came out in a different order on each build, and so did the static-manifest plugin's file. Articles and pages were read in a random order as well. Sorting by date usually hid that, but articles with the same date could swap places, and the order of each item's `translations` list could change.\n\n**Fix** (`pelican/generators.py`): the static, article and page generators, plus the disabled-readers warning check, now loop over `sorted(...)` paths. For static files that's the found files together with the files linked from content.\n\nHow this meets your requirements:\n- **Already-reproducible sites don't change.** I built `samples/` without the plugin before and after the fix and the output trees are byte-identical.\n- **No plugin or theme API changes.** `get_files()` still returns a `set` with the same signature; only the loops that use it were changed.\n- **Works however Pelican is run, without environment variables.** The order comes from sorting, not from `PYTHONHASHSEED`, and sorting a list of strings behaves the same on Python 3.11+.\n\n**Checks:**\n- Before the fix, four runs of your reproduction (`bug-repro/README.md`) gave four different `static-manifest.txt` files. After it, all four output trees are identical.\n- Running Pelican as a library under three different `PYTHONHASHSEED` values also gave identical trees, with the same manifest as the command-line runs.\n- I added `TestStaticGenerator.test_staticfiles_order_is_deterministic`. It passes with the fix and fails without it.\n- The suite: 292 passed, 21 skipped, 1 error. The error is `pelican/tests/build_test/test_build_files.py`, which can't be imported because `pelican` isn't installed as a package here (`PackageNotFoundError`). The same error happens on unmodified `main`.\n\n**Things I noticed but didn't change:**\n- The reproduction steps use `PLUGIN_PATHS=[\"bug-repro\"]`, but relative plugin paths are looked up from the settings file's folder (`samples/`). With those steps as written the plugin fails to load, and only `pelican -D` shows the error. I used an absolute path to reproduce the bug.\n- With `STATIC_PATHS=[\"\"]`, a file that is also linked from content gets processed twice: once as `./fake_image.jpg` and once as `fake_image.jpg`. That was already happening and is now at least in a stable order, but it's a separate quirk.\n\nNothing is committed yet.",
+  "files_changed": " 2 files changed, 37 insertions(+), 7 deletions(-)",
+  "check": {
+    "det_relurls": {
+      "distinct_outputs": 1,
+      "ok": true
+    },
+    "det_sample_pelican.conf.py": {
+      "distinct_outputs": 1,
+      "ok": true
+    },
+    "det_sample_pelican.conf_FR.py": {
+      "distinct_outputs": 1,
+      "ok": true
+    },
+    "det_library": {
+      "distinct_outputs": 1,
+      "ok": true
+    },
+    "unchanged_en": {
+      "ok": true
+    },
+    "unchanged_fr": {
+      "ok": true
+    },
+    "unchanged_rel": {
+      "ok": true
+    },
+    "api": {
+      "get_files_type": "set",
+      "ok": true
+    },
+    "visible": "292 passed, 21 skipped in 3.49s",
+    "all_hidden_ok": true
+  }
+}

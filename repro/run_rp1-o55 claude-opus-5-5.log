@@ -1,0 +1,4 @@
+usage: run_pilot.py [-h] --label LABEL --model MODEL [--timeout TIMEOUT]
+                    [--budget BUDGET] [--prompt PROMPT] [--extra EXTRA]
+                    [--checker CHECKER]
+run_pilot.py: error: argument --model: expected one argument
