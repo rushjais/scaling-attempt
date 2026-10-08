@@ -16,7 +16,7 @@ measured candidates ([`SHORTLIST.md`](SHORTLIST.md)).
 |---|---|---|---|
 | 1 | Migrate `os.path` → `pathlib`, behavior unchanged | 2 × Opus 5.5 | Both passed every check in ~10 min, by keeping `os.path` exactly where `pathlib` behaves differently |
 | 2 | Same, but filesystem paths *must* use `pathlib` | Opus 5.5 ×2, Opus 4.7, Sonnet 5.5 | Every valid run passed; models differed on cost ($1.80 to $19.37), not correctness |
-| 3 | Fix a real, apparently unreported bug found in pilot 1: with some plugins, output differs between builds | Opus 5.5 ×2, Opus 4.7, Sonnet 5.5 | All four fixed the root cause in 1–5 minutes |
+| 3 | Fix a real bug found in pilot 1: with some plugins, output differs between builds (submitted upstream: [pelican#3621](https://github.com/getpelican/pelican/pull/3621)) | Opus 5.5 ×2, Opus 4.7, Sonnet 5.5 | All four fixed the root cause in 1–5 minutes |
 
 Full write-up of every run, check and decision: [`pilot/PILOT.md`](pilot/PILOT.md).
 

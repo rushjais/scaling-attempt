@@ -1,4 +1,9 @@
-# Draft: upstream issue for getpelican/pelican (not yet filed)
+# Upstream report for getpelican/pelican
+
+Submitted as a pull request with the fix and a regression test, per Pelican's
+contributing guide (no separate issue): https://github.com/getpelican/pelican/pull/3621
+
+Original draft:
 
 **Title:** Output order of static files depends on `PYTHONHASHSEED`, making builds non-reproducible with some plugins
 
