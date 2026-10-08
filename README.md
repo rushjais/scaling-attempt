@@ -6,7 +6,7 @@ repo is my attempt to build a second task inside a real, sizable codebase, and
 the pilots I ran first to check that the failure I wanted to measure actually
 exists. **It didn't, three times**, and the commit history shows each step.
 
-**Write-up (covers both projects):** https://rushjais.github.io/what-agents-dont-test/
+**Write-up (covers both projects):** https://rushiljaiswal.com/agents
 
 The codebase is [Pelican](https://github.com/getpelican/pelican), a static site
 generator (~8,700 source lines), pinned at `3c69dc6` and chosen from ten
