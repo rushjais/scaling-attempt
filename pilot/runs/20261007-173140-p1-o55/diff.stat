@@ -1,0 +1,15 @@
+ pelican/__init__.py                 | 14 ++++--
+ pelican/cache.py                    |  5 +-
+ pelican/contents.py                 | 15 ++++++
+ pelican/generators.py               | 99 ++++++++++++++++++++++---------------
+ pelican/paginator.py                |  3 ++
+ pelican/readers.py                  | 10 +++-
+ pelican/server.py                   |  9 +++-
+ pelican/settings.py                 | 31 +++++++++---
+ pelican/tools/pelican_import.py     | 42 ++++++++++------
+ pelican/tools/pelican_quickstart.py | 20 ++++----
+ pelican/tools/pelican_themes.py     | 73 +++++++++++++--------------
+ pelican/urlwrappers.py              |  2 +
+ pelican/utils.py                    | 82 +++++++++++++++++++-----------
+ pelican/writers.py                  |  6 ++-
+ 14 files changed, 266 insertions(+), 145 deletions(-)

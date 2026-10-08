@@ -27,11 +27,17 @@ IMAGE = "pelican-migration-pilot"
 
 BUILD = """
 set -u
-plug='-e PLUGIN_PATHS=["/check/probe_plugin"] PLUGINS=["path_probe"]'
-python -m pelican samples/content -s samples/pelican.conf.py -o /out/en -q $plug >/out/en.log 2>&1 || echo build-failed-en
+# Differential builds: no plugins (the probe reads URLs early, which freezes
+# attachment locations and changes output), fixed hash seed (Pelican's output
+# can depend on set iteration order once anything reads URLs early).
+export PYTHONHASHSEED=0
+python -m pelican samples/content -s samples/pelican.conf.py -o /out/en -q >/out/en.log 2>&1 || echo build-failed-en
 python -m pelican samples/content -s samples/pelican.conf_FR.py -o /out/fr -q >/out/fr.log 2>&1 || echo build-failed-fr
-cd /check/site_relurls && PATH_PROBE_REPORT=/out/probe_relurls.json \
-  python -m pelican content -s pelicanconf.py -o /out/relurls -q $plug >/out/relurls.log 2>&1 || echo build-failed-relurls
+(cd /check/site_relurls && python -m pelican content -s pelicanconf.py -o /out/relurls -q >/out/relurls.log 2>&1) || echo build-failed-relurls
+# Separate probe builds, output discarded: only the probe report matters.
+plug='-e PLUGIN_PATHS=["/check/probe_plugin"] PLUGINS=["path_probe"]'
+PATH_PROBE_REPORT=/out/probe_en.json python -m pelican samples/content -s samples/pelican.conf.py -o /tmp/probe_en -q $plug >/out/probe_en.log 2>&1 || echo probe-failed-en
+(cd /check/site_relurls && PATH_PROBE_REPORT=/out/probe_relurls.json python -m pelican content -s pelicanconf.py -o /tmp/probe_rel -q $plug >/out/probe_relurls.log 2>&1) || echo probe-failed-relurls
 """
 
 
@@ -39,7 +45,7 @@ def docker(repo, out, script):
     return subprocess.run(
         [DOCKER, "run", "--rm", "--user", f"{os.getuid()}:{os.getgid()}",
          "-v", f"{os.path.abspath(repo)}:/work/repo", "-v", f"{out}:/out",
-         "-v", f"{HERE}:/check:ro", "-e", "PATH_PROBE_REPORT=/out/probe_en.json",
+         "-v", f"{HERE}:/check:ro",
          IMAGE, "sh", "-c", script],
         capture_output=True, text=True)
 
